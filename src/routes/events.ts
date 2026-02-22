@@ -1,5 +1,6 @@
 /**
  * GET /events - Server-Sent Events stream
+ * Optional query param: ?userId=... for personalized streams with 'me' data
  */
 
 import { Router, Request, Response } from "express";
@@ -8,6 +9,9 @@ import { addClient, removeClient } from "../sse/broker";
 const router = Router();
 
 router.get("/", (req: Request, res: Response) => {
+  // Get optional userId for personalized stream
+  const userId = req.query.userId as string | undefined;
+
   // Set SSE headers for production compatibility
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -20,8 +24,8 @@ router.get("/", (req: Request, res: Response) => {
   // Flush headers immediately
   res.flushHeaders();
 
-  // Register client (sends initial state)
-  const clientId = addClient(res);
+  // Register client (sends initial state, personalized if userId provided)
+  const clientId = addClient(res, userId);
 
   // Handle client disconnect
   req.on("close", () => {

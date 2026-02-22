@@ -1,15 +1,20 @@
 /**
  * SSE Broker - manages client connections and broadcasts
+ * Supports personalized streams with userId parameter
  */
 
 import type { Response } from "express";
 import { getState } from "../state/store";
+import { getPlayerInfo } from "../state/players";
+import type { QuizState } from "../types/quiz";
 
 /** SSE Client connection */
 interface SSEClient {
   id: string;
   res: Response;
   connectedAt: number;
+  /** Optional userId for personalized streams */
+  userId?: string;
 }
 
 /** Active client connections */
@@ -56,25 +61,50 @@ function sendComment(client: SSEClient, comment: string): boolean {
 }
 
 /**
- * Add a new SSE client connection
+ * Get personalized state for a client
+ * Adds 'me' field if client has userId
  */
-export function addClient(res: Response): string {
+function getPersonalizedState(client: SSEClient): QuizState {
+  const state = getState();
+  
+  if (!client.userId) {
+    return state;
+  }
+  
+  const playerInfo = getPlayerInfo(client.userId);
+  if (!playerInfo) {
+    return state;
+  }
+  
+  return {
+    ...state,
+    me: playerInfo,
+  };
+}
+
+/**
+ * Add a new SSE client connection
+ * @param res - Express Response object
+ * @param userId - Optional userId for personalized streams
+ */
+export function addClient(res: Response, userId?: string): string {
   const id = generateClientId();
   const client: SSEClient = {
     id,
     res,
     connectedAt: Date.now(),
+    userId,
   };
 
   clients.set(id, client);
   
   const isDev = process.env.NODE_ENV !== "production";
   if (isDev) {
-    console.log(`[SSE] Client connected: ${id} (total: ${clients.size})`);
+    console.log(`[SSE] Client connected: ${id}${userId ? ` (userId: ${userId})` : ""} (total: ${clients.size})`);
   }
 
-  // Send current state immediately on connect
-  const state = getState();
+  // Send current state immediately on connect (personalized if userId provided)
+  const state = getPersonalizedState(client);
   sendMessage(client, state);
 
   // Start heartbeat if this is the first client
@@ -107,12 +137,23 @@ export function removeClient(id: string): void {
 
 /**
  * Broadcast state update to all connected clients
+ * Each client gets personalized state if they have userId
  */
 export function broadcast(state: unknown): void {
   const failedClients: string[] = [];
+  const baseState = state as QuizState;
 
   clients.forEach((client) => {
-    const success = sendMessage(client, state);
+    // Personalize state for clients with userId
+    let clientState = baseState;
+    if (client.userId) {
+      const playerInfo = getPlayerInfo(client.userId);
+      if (playerInfo) {
+        clientState = { ...baseState, me: playerInfo };
+      }
+    }
+    
+    const success = sendMessage(client, clientState);
     if (!success) {
       failedClients.push(client.id);
     }

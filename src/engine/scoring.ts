@@ -15,8 +15,9 @@ export type ScoringMode = "flat" | "v2";
 
 export const POINTS_PER_CORRECT = 10;
 
-const RAW_SCORING_MODE = (process.env.SCORING_MODE || "flat").toLowerCase();
-const SCORING_MODE: ScoringMode = RAW_SCORING_MODE === "v2" ? "v2" : "flat";
+// Default to "v2" for time-based scoring with streak bonus
+const RAW_SCORING_MODE = (process.env.SCORING_MODE || "v2").toLowerCase();
+const SCORING_MODE: ScoringMode = RAW_SCORING_MODE === "flat" ? "flat" : "v2";
 
 const DIFFICULTY_BONUS: Record<1 | 2 | 3 | 4 | 5, number> = {
   1: 0,
@@ -32,6 +33,8 @@ export interface ScoreCalculationInput {
   answerTimeMs?: number;
   openStartMs?: number;
   openDurationMs?: number;
+  /** Current streak count BEFORE this answer (used for streak bonus) */
+  currentStreak?: number;
 }
 
 export interface ScoreCalculationDetails {
@@ -40,9 +43,10 @@ export interface ScoreCalculationDetails {
   basePoints: number;
   difficulty: 1 | 2 | 3 | 4 | 5;
   difficultyBonus: number;
+  streakBonus: number;
   subtotal: number;
   f: number;
-  multiplier: number;
+  timeMultiplier: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -66,11 +70,21 @@ export function getScoringMode(): ScoringMode {
   return SCORING_MODE;
 }
 
+/**
+ * Calculate streak bonus points.
+ * Streak 0: +0, Streak 1: +2, Streak 2: +4, ... up to max +10 at streak 5+
+ */
+function calculateStreakBonus(streak: number): number {
+  return Math.min(streak * 2, 10);
+}
+
 export function calculateScoreDetails(input: ScoreCalculationInput): ScoreCalculationDetails {
   const basePoints = POINTS_PER_CORRECT;
   const difficulty = normalizeDifficulty(input.difficulty);
   const difficultyBonus = DIFFICULTY_BONUS[difficulty];
-  const subtotal = basePoints + difficultyBonus;
+  const currentStreak = input.currentStreak ?? 0;
+  const streakBonus = calculateStreakBonus(currentStreak);
+  const subtotal = basePoints + difficultyBonus + streakBonus;
 
   const openDurationMs = input.openDurationMs && input.openDurationMs > 0
     ? input.openDurationMs
@@ -80,7 +94,8 @@ export function calculateScoreDetails(input: ScoreCalculationInput): ScoreCalcul
   const answerTimeMs = input.answerTimeMs ?? openStartMs;
   const rawFraction = (answerTimeMs - openStartMs) / openDurationMs;
   const f = clamp(rawFraction, 0, 1);
-  const multiplier = 1 + 0.5 * (1 - f) * (1 - f);
+  // Time multiplier: 1.5x for instant answer, 1.0x at deadline
+  const timeMultiplier = 1 + 0.5 * (1 - f) * (1 - f);
 
   if (!input.isCorrect) {
     return {
@@ -89,9 +104,10 @@ export function calculateScoreDetails(input: ScoreCalculationInput): ScoreCalcul
       basePoints,
       difficulty,
       difficultyBonus,
-      subtotal,
+      streakBonus: 0,
+      subtotal: basePoints + difficultyBonus,
       f,
-      multiplier,
+      timeMultiplier,
     };
   }
 
@@ -102,21 +118,24 @@ export function calculateScoreDetails(input: ScoreCalculationInput): ScoreCalcul
       basePoints,
       difficulty,
       difficultyBonus,
-      subtotal,
+      streakBonus: 0,
+      subtotal: basePoints,
       f,
-      multiplier,
+      timeMultiplier,
     };
   }
 
+  // v2 mode: (base + difficulty + streak) * time multiplier
   return {
     mode: SCORING_MODE,
-    score: Math.round(subtotal * multiplier),
+    score: Math.round(subtotal * timeMultiplier),
     basePoints,
     difficulty,
     difficultyBonus,
+    streakBonus,
     subtotal,
     f,
-    multiplier,
+    timeMultiplier,
   };
 }
 

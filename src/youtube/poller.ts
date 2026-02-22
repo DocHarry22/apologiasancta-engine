@@ -30,6 +30,8 @@ export interface PollerStatus {
   lastPollAt: number | null;
   messagesProcessed: number;
   answersSubmitted: number;
+  answersRejectedPhase: number;
+  answersRejectedDuplicate: number;
   errorCount: number;
   lastError: string | null;
 }
@@ -55,6 +57,8 @@ export class YouTubePoller {
     lastPollAt: null as number | null,
     messagesProcessed: 0,
     answersSubmitted: 0,
+    answersRejectedPhase: 0,
+    answersRejectedDuplicate: 0,
     errorCount: 0,
     lastError: null as string | null,
   };
@@ -98,6 +102,8 @@ export class YouTubePoller {
         lastPollAt: null,
         messagesProcessed: 0,
         answersSubmitted: 0,
+        answersRejectedPhase: 0,
+        answersRejectedDuplicate: 0,
         errorCount: 0,
         lastError: null,
       };
@@ -137,6 +143,8 @@ export class YouTubePoller {
       lastPollAt: this.stats.lastPollAt,
       messagesProcessed: this.stats.messagesProcessed,
       answersSubmitted: this.stats.answersSubmitted,
+      answersRejectedPhase: this.stats.answersRejectedPhase,
+      answersRejectedDuplicate: this.stats.answersRejectedDuplicate,
       errorCount: this.stats.errorCount,
       lastError: this.stats.lastError,
     };
@@ -243,7 +251,11 @@ export class YouTubePoller {
     // Check if quiz is in OPEN phase
     const phase = getCurrentPhase();
     if (phase !== "OPEN") {
-      console.log(`[YouTube] Ignoring answer from ${message.authorDetails.displayName}: phase is ${phase}`);
+      this.stats.answersRejectedPhase++;
+      // Only log occasionally to avoid spam
+      if (this.stats.answersRejectedPhase % 10 === 1) {
+        console.log(`[YouTube] Ignoring answers during ${phase} phase (total: ${this.stats.answersRejectedPhase})`);
+      }
       return;
     }
 
@@ -257,7 +269,11 @@ export class YouTubePoller {
     // Check if this user already answered this question
     const lastAnsweredQuestion = this.userAnswers.get(channelId);
     if (lastAnsweredQuestion === questionIndex) {
-      console.log(`[YouTube] Ignoring duplicate answer from ${displayName} for Q${questionIndex + 1}`);
+      this.stats.answersRejectedDuplicate++;
+      // Log only occasionally
+      if (this.stats.answersRejectedDuplicate % 10 === 1) {
+        console.log(`[YouTube] Duplicate answers rejected: ${this.stats.answersRejectedDuplicate} total`);
+      }
       return;
     }
 

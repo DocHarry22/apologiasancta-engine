@@ -4,24 +4,25 @@
 
 import { Router, Request, Response } from "express";
 import { getCurrentPhase, getQuestionIndex } from "../engine/roundController";
-import { submitAnswer } from "../state/players";
+import { submitAnswer, submitAnswerForRegistered, isRegistered, getOrCreatePlayer } from "../state/players";
 
 const router = Router();
 
 interface AnswerBody {
   userId: string;
-  name: string;
+  name?: string;     // Optional: only needed for YouTube auto-registration
+  username?: string; // Preferred: for registered mobile users
   choiceId: string;
 }
 
 router.post("/", (req: Request, res: Response) => {
-  const { userId, name, choiceId } = req.body as AnswerBody;
+  const { userId, name, username, choiceId } = req.body as AnswerBody;
 
   // Validate required fields
-  if (!userId || !name || !choiceId) {
+  if (!userId || !choiceId) {
     res.status(400).json({
       ok: false,
-      error: "Missing required fields: userId, name, choiceId",
+      error: "Missing required fields: userId, choiceId",
     });
     return;
   }
@@ -47,17 +48,50 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
-  // Submit answer
   const questionIndex = getQuestionIndex();
   const normalizedChoiceId = choiceId.toLowerCase();
-  const accepted = submitAnswer(questionIndex, userId, name, normalizedChoiceId);
 
-  if (!accepted) {
-    // Already answered - return 200 with accepted: false per spec
+  // Handle YouTube vs Mobile answers differently
+  const isYouTubeUser = userId.startsWith("yt:");
+  
+  if (isYouTubeUser) {
+    // YouTube users: auto-register with collision handling
+    const displayName = name || username || "YouTuber";
+    const accepted = submitAnswer(questionIndex, userId, displayName, normalizedChoiceId);
+    
+    if (!accepted) {
+      res.json({
+        ok: true,
+        accepted: false,
+        reason: "already_answered",
+      });
+      return;
+    }
+    
+    res.json({
+      ok: true,
+      accepted: true,
+    });
+    return;
+  }
+
+  // Mobile users: require registration
+  if (!isRegistered(userId)) {
+    res.status(401).json({
+      ok: false,
+      error: "Not registered. Call POST /register first.",
+      reason: "not_registered",
+    });
+    return;
+  }
+
+  const result = submitAnswerForRegistered(questionIndex, userId, normalizedChoiceId);
+
+  if (!result.accepted) {
     res.json({
       ok: true,
       accepted: false,
-      reason: "already_answered",
+      reason: result.reason,
     });
     return;
   }

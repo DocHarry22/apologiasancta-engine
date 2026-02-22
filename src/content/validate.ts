@@ -122,6 +122,11 @@ export function normalizeToEngine(uiQuestion: UIQuestion): QuestionData {
     D: "D",
   };
 
+  const themeTitle = uiQuestion.topicId
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .toUpperCase();
+
   return {
     text: uiQuestion.question,
     choices: [
@@ -136,7 +141,7 @@ export function normalizeToEngine(uiQuestion: UIQuestion): QuestionData {
       body: uiQuestion.teaching.body,
       refs: uiQuestion.teaching.refs || [],
     },
-    themeTitle: uiQuestion.teaching.title,
+    themeTitle,
   };
 }
 

@@ -14,6 +14,7 @@ import answerRouter from "./routes/answer";
 import adminRouter from "./routes/admin";
 import adminYoutubeRouter from "./routes/adminYoutube";
 import contentAdminRouter from "./routes/content";
+import registerRouter from "./routes/register";
 import { getStatus } from "./engine/roundController";
 
 /**
@@ -85,6 +86,7 @@ export function createApp(): express.Application {
   app.use("/state", stateRouter);
   app.use("/events", eventsRouter);
   app.use("/answer", answerRouter);
+  app.use("/register", registerRouter);
   app.use("/admin", adminRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
   app.use("/admin", contentAdminRouter); // Content management routes
@@ -98,8 +100,9 @@ export function createApp(): express.Application {
       endpoints: {
         health: "GET /health - Health check",
         state: "GET /state - Current quiz state",
-        events: "GET /events - SSE stream",
+        events: "GET /events?userId=... - SSE stream (personalized if userId provided)",
         answer: "POST /answer - Submit answer",
+        register: "POST /register - Register unique username, GET /me/:userId, GET /rank/:userId, POST /rename",
         admin: "POST /admin/* - Admin controls (requires x-admin-token)",
         youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
         content: "POST /admin/content/* - Content management (requires x-admin-token)",

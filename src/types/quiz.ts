@@ -86,4 +86,19 @@ export interface QuizState {
 
   /** Ticker bar content */
   ticker?: Ticker;
+  
+  /** Personalized player data (only in personalized SSE streams) */
+  me?: PlayerInfo;
+}
+
+/**
+ * Personalized player info included in SSE for registered users
+ */
+export interface PlayerInfo {
+  userId: string;
+  username: string;
+  totalPoints: number;
+  streak: number;
+  rank?: number;
+  distanceToTop10?: number;
 }

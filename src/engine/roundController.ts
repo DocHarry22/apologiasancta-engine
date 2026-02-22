@@ -19,7 +19,7 @@ import { broadcast, getClientCount } from "../sse/broker";
 /** Phase durations from environment (in seconds) */
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
 const LOCK_SECONDS = parseInt(process.env.LOCK_SECONDS || "2", 10);
-const REVEAL_SECONDS = parseInt(process.env.REVEAL_SECONDS || "12", 10);
+const REVEAL_SECONDS = parseInt(process.env.REVEAL_SECONDS || "8", 10);
 
 /**
  * Get question by index - uses active pool if available, falls back to legacy bank
