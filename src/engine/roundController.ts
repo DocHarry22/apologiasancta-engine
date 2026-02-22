@@ -5,7 +5,8 @@
  */
 
 import type { QuizState, QuizPhase } from "../types/quiz";
-import { getQuestion, getTotalQuestions } from "../content/questions";
+import { getQuestion as getLegacyQuestion, getTotalQuestions as getLegacyTotal } from "../content/questions";
+import { getPoolQuestion, getActivePoolSize, isPoolEmpty } from "../content/bank";
 import {
   evaluateAnswers,
   getTopScorers,
@@ -19,6 +20,28 @@ import { broadcast, getClientCount } from "../sse/broker";
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
 const LOCK_SECONDS = parseInt(process.env.LOCK_SECONDS || "2", 10);
 const REVEAL_SECONDS = parseInt(process.env.REVEAL_SECONDS || "12", 10);
+
+/**
+ * Get question by index - uses active pool if available, falls back to legacy bank
+ */
+function getQuestion(index: number) {
+  const poolQuestion = getPoolQuestion(index);
+  if (poolQuestion) {
+    return poolQuestion;
+  }
+  return getLegacyQuestion(index);
+}
+
+/**
+ * Get total number of questions - uses active pool if available
+ */
+function getTotalQuestions(): number {
+  const poolSize = getActivePoolSize();
+  if (poolSize > 0) {
+    return poolSize;
+  }
+  return getLegacyTotal();
+}
 
 /** Controller state */
 interface ControllerState {

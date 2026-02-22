@@ -13,6 +13,7 @@ import eventsRouter from "./routes/events";
 import answerRouter from "./routes/answer";
 import adminRouter from "./routes/admin";
 import adminYoutubeRouter from "./routes/adminYoutube";
+import contentAdminRouter from "./routes/content";
 import { getStatus } from "./engine/roundController";
 
 /**
@@ -86,6 +87,7 @@ export function createApp(): express.Application {
   app.use("/answer", answerRouter);
   app.use("/admin", adminRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
+  app.use("/admin", contentAdminRouter); // Content management routes
 
   // Root endpoint - API info
   app.get("/", (_req, res) => {
@@ -100,6 +102,8 @@ export function createApp(): express.Application {
         answer: "POST /answer - Submit answer",
         admin: "POST /admin/* - Admin controls (requires x-admin-token)",
         youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
+        content: "POST /admin/content/* - Content management (requires x-admin-token)",
+        quizSet: "POST /admin/quiz/set - Set active quiz pool (requires x-admin-token)",
       },
       controller: status,
     });

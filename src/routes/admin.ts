@@ -20,8 +20,9 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 
 /**
  * Middleware to verify admin token
+ * Exported for use in other admin route files
  */
-function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const token = req.headers["x-admin-token"] || req.headers["admin-token"];
 
   if (token !== ADMIN_TOKEN) {
