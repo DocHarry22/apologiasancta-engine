@@ -10,6 +10,13 @@ interface GitHubFileResult {
   contentText: string;
 }
 
+interface GitHubDirectoryItem {
+  name: string;
+  path: string;
+  sha: string;
+  type: "file" | "dir";
+}
+
 interface GitHubErrorResponse {
   message: string;
   documentation_url?: string;
@@ -152,6 +159,45 @@ export async function deleteFile(
 }
 
 /**
+ * List files/directories at a GitHub repository path
+ */
+export async function listDirectory(
+  owner: string,
+  repo: string,
+  path: string,
+  branch: string,
+  token?: string
+): Promise<GitHubDirectoryItem[]> {
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
+
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers,
+  });
+
+  if (response.status === 404) {
+    return [];
+  }
+
+  if (!response.ok) {
+    const error = (await response.json()) as GitHubErrorResponse;
+    throw new Error(`GitHub API error: ${error.message}`);
+  }
+
+  const data = (await response.json()) as GitHubDirectoryItem[] | GitHubDirectoryItem;
+  return Array.isArray(data) ? data : [data];
+}
+
+/**
  * Get GitHub configuration from environment
  */
 export function getGitHubConfig(): {
@@ -161,11 +207,17 @@ export function getGitHubConfig(): {
   token: string;
   contentRoot: string;
 } | null {
-  const owner = process.env.GITHUB_OWNER;
-  const repo = process.env.GITHUB_REPO;
-  const branch = process.env.GITHUB_BRANCH || "main";
-  const token = process.env.GITHUB_TOKEN;
-  const contentRoot = process.env.CONTENT_ROOT || "content/topics";
+  const owner = process.env.GITHUB_OWNER?.trim() || process.env.GITHUB_CONTENT_OWNER?.trim();
+  const repo = process.env.GITHUB_REPO?.trim() || process.env.GITHUB_CONTENT_REPO?.trim();
+  const branch =
+    process.env.GITHUB_BRANCH?.trim() ||
+    process.env.GITHUB_CONTENT_BRANCH?.trim() ||
+    "main";
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const contentRoot =
+    process.env.CONTENT_ROOT?.trim() ||
+    process.env.GITHUB_CONTENT_PATH?.trim() ||
+    "apologiasancta-ui/content/topics";
 
   if (!owner || !repo || !token) {
     return null;

@@ -102,3 +102,94 @@ export interface PlayerInfo {
   rank?: number;
   distanceToTop10?: number;
 }
+
+// ============== Topic Completion Types ==============
+
+/** Summary statistics for a completed topic */
+export interface TopicSummaryStats {
+  /** Average correct percentage across all participants */
+  averageCorrectPct: number;
+  /** Total number of participants who answered at least one question */
+  totalParticipants: number;
+  /** Highest score achieved in this topic */
+  maxScore: number;
+  /** Total questions in the topic */
+  questionCount: number;
+}
+
+/** Scorer entry with additional streak info for topic summary */
+export interface TopicScorerSummary extends Scorer {
+  streak: number;
+}
+
+/** Top streak entry for topic summary */
+export interface TopicStreakSummary {
+  rank: number;
+  name: string;
+  streak: number;
+  score: number;
+}
+
+/** Full topic completion summary data */
+export interface TopicSummary {
+  /** Leaders list (top scorers) */
+  leaders: TopicScorerSummary[];
+  /** Top streaks with scores */
+  topStreaks: TopicStreakSummary[];
+  /** Aggregate stats */
+  stats: TopicSummaryStats;
+}
+
+/** Topic complete event payload sent via SSE */
+export interface TopicCompleteEvent {
+  type: "topicComplete";
+  /** Topic ID that was just completed */
+  topicId: string;
+  /** Topic display title */
+  topicTitle: string;
+  /** Summary data for display */
+  summary: TopicSummary;
+  /** Next topic ID (null if series complete) */
+  nextTopicId: string | null;
+  /** Next topic display title (null if series complete) */
+  nextTopicTitle: string | null;
+  /** Time (ms) until auto-advance to next topic (0 = manual only) */
+  autoAdvanceMs: number;
+  /** Whether this is the last topic in the series */
+  isSeriesComplete: boolean;
+}
+
+/** Series complete event payload (shown when all topics are done) */
+export interface SeriesCompleteEvent {
+  type: "seriesComplete";
+  /** All topics in the series */
+  completedTopics: string[];
+  /** Option to restart from beginning */
+  canRestart: boolean;
+}
+
+/** Topic start event payload sent via SSE when a new topic begins */
+export interface TopicStartEvent {
+  type: "topicStart";
+  /** Topic ID that is starting */
+  topicId: string;
+  /** Topic display title */
+  topicTitle: string;
+  /** Index in the sequence (0-based) */
+  topicIndex: number;
+  /** Total topics in sequence */
+  totalTopics: number;
+}
+
+/** Topic countdown event payload sent via SSE before topic starts */
+export interface TopicCountdownEvent {
+  type: "topicCountdown";
+  /** Topic ID that will start */
+  topicId: string;
+  /** Topic display title */
+  topicTitle: string;
+  /** Countdown duration in seconds */
+  countdownSeconds: number;
+  /** Unix timestamp (ms) when countdown ends */
+  endsAtMs: number;
+}

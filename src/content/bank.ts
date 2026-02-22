@@ -172,6 +172,40 @@ export function getActivePoolSize(): number {
 }
 
 /**
+ * Get topic IDs currently in the active pool
+ */
+export function getActivePoolTopicIds(): string[] {
+  const topicIds = new Set<string>();
+  for (const entry of activePool) {
+    topicIds.add(entry.topicId);
+  }
+  return Array.from(topicIds);
+}
+
+/**
+ * Get the current active topic ID (if pool contains only one topic)
+ * Returns null if pool has multiple topics or is empty
+ */
+export function getActiveTopicId(): string | null {
+  const topicIds = getActivePoolTopicIds();
+  if (topicIds.length === 1) {
+    return topicIds[0];
+  }
+  return null;
+}
+
+/**
+ * Convert topic ID to display title
+ * E.g., "genesis-chapter-1" -> "Genesis Chapter 1"
+ */
+export function topicIdToTitle(topicId: string): string {
+  return topicId
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
  * Get a question from the active pool by index
  */
 export function getPoolQuestion(index: number): QuestionData | null {

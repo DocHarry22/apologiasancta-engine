@@ -169,6 +169,30 @@ export function broadcast(state: unknown): void {
 }
 
 /**
+ * Broadcast a typed event to all connected clients.
+ * Used for special events like topicComplete, seriesComplete.
+ * Events are sent with their type field preserved.
+ */
+export function broadcastEvent<T extends { type: string }>(event: T): void {
+  const failedClients: string[] = [];
+
+  clients.forEach((client) => {
+    const success = sendMessage(client, event as Record<string, unknown>);
+    if (!success) {
+      failedClients.push(client.id);
+    }
+  });
+
+  // Remove failed clients
+  failedClients.forEach((id) => removeClient(id));
+
+  const isDev = process.env.NODE_ENV !== "production";
+  if (isDev) {
+    console.log(`[SSE] Event broadcast (${event.type}) to ${clients.size} clients`);
+  }
+}
+
+/**
  * Start heartbeat timer
  */
 function startHeartbeat(): void {

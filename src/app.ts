@@ -15,6 +15,7 @@ import adminRouter from "./routes/admin";
 import adminYoutubeRouter from "./routes/adminYoutube";
 import contentAdminRouter from "./routes/content";
 import registerRouter from "./routes/register";
+import topicsRouter from "./routes/topics";
 import { getStatus } from "./engine/roundController";
 
 /**
@@ -87,6 +88,7 @@ export function createApp(): express.Application {
   app.use("/events", eventsRouter);
   app.use("/answer", answerRouter);
   app.use("/register", registerRouter);
+  app.use("/topics", topicsRouter); // Public content browsing
   app.use("/admin", adminRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
   app.use("/admin", contentAdminRouter); // Content management routes
@@ -103,6 +105,7 @@ export function createApp(): express.Application {
         events: "GET /events?userId=... - SSE stream (personalized if userId provided)",
         answer: "POST /answer - Submit answer",
         register: "POST /register - Register unique username, GET /me/:userId, GET /rank/:userId, POST /rename",
+        topics: "GET /topics - List topics with counts, GET /topics/:id - Topic details (public)",
         admin: "POST /admin/* - Admin controls (requires x-admin-token)",
         youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
         content: "POST /admin/content/* - Content management (requires x-admin-token)",

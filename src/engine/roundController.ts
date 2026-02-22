@@ -2,19 +2,47 @@
  * Round Controller - State machine for quiz phases
  *
  * Phases: OPEN -> LOCKED -> REVEAL -> (NEXT) -> OPEN
+ * 
+ * Topic Completion Flow:
+ * When last question of a topic is REVEALED, the controller:
+ * 1. Emits topicComplete event with summary data
+ * 2. Optionally auto-advances to next topic after delay
+ * 3. Resets scores/streaks for the new topic
  */
 
-import type { QuizState, QuizPhase } from "../types/quiz";
+import type { QuizState, QuizPhase, TopicCompleteEvent, TopicSummary, TopicStartEvent, TopicCountdownEvent } from "../types/quiz";
 import { getQuestion as getLegacyQuestion, getTotalQuestions as getLegacyTotal } from "../content/questions";
-import { getPoolQuestion, getPoolEntry, getActivePoolSize, isPoolEmpty } from "../content/bank";
+import { 
+  getPoolQuestion, 
+  getPoolEntry, 
+  getActivePoolSize, 
+  isPoolEmpty,
+  getActiveTopicId,
+  topicIdToTitle,
+  getAllTopicIds,
+  setActivePool,
+} from "../content/bank";
+import { getScoringMode } from "./scoring";
 import {
   evaluateAnswers,
   getTopScorers,
   getTopStreaks,
   clearAnswersForQuestion,
   resetAllPlayers,
+  getTopScorersWithStreaks,
+  getTopStreaksWithScores,
+  getTopicStats,
+  resetScoresAndStreaks,
+  clearPlayerStats,
+  clearAllAnswers,
 } from "../state/players";
-import { broadcast, getClientCount } from "../sse/broker";
+import { broadcast, broadcastEvent, getClientCount } from "../sse/broker";
+import {
+  getTopicSequenceConfig,
+  getNextTopicId,
+  getFirstTopicId,
+  isLastTopic,
+} from "../config/topicSequence";
 
 /** Phase durations from environment (in seconds) */
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
@@ -51,6 +79,12 @@ interface ControllerState {
   endsAtMs: number;
   openStartMs: number;
   timer: NodeJS.Timeout | null;
+  /** Auto-advance timer for topic transitions */
+  topicTransitionTimer: NodeJS.Timeout | null;
+  /** Whether we're in topic summary display mode */
+  inTopicSummary: boolean;
+  /** Current topic being displayed in summary (for UI state) */
+  summaryTopicId: string | null;
 }
 
 /** Current controller state */
@@ -61,6 +95,9 @@ const state: ControllerState = {
   endsAtMs: 0,
   openStartMs: 0,
   timer: null,
+  topicTransitionTimer: null,
+  inTopicSummary: false,
+  summaryTopicId: null,
 };
 
 function getCurrentDifficulty(): number {
@@ -202,14 +239,159 @@ function enterRevealPhase(): void {
 }
 
 /**
+ * Check if current question is the last in the topic/pool
+ */
+function isLastQuestion(): boolean {
+  return state.questionIndex === getTotalQuestions() - 1;
+}
+
+/**
+ * Build topic summary data for emission
+ */
+function buildTopicSummary(): TopicSummary {
+  const leaders = getTopScorersWithStreaks(10);
+  const topStreaks = getTopStreaksWithScores(5);
+  const stats = getTopicStats();
+
+  return {
+    leaders: leaders.map((l) => ({
+      rank: l.rank,
+      name: l.name,
+      score: l.score,
+      streak: l.streak,
+    })),
+    topStreaks: topStreaks.map((s) => ({
+      rank: s.rank,
+      name: s.name,
+      streak: s.streak,
+      score: s.score,
+    })),
+    stats: {
+      averageCorrectPct: stats.averageCorrectPct,
+      totalParticipants: stats.totalParticipants,
+      maxScore: stats.maxScore,
+      questionCount: getTotalQuestions(),
+    },
+  };
+}
+
+/**
+ * Emit topic complete event and handle transition
+ */
+function emitTopicComplete(): void {
+  const currentTopicId = getActiveTopicId();
+  if (!currentTopicId) {
+    console.log("[Controller] No active topic to complete");
+    return;
+  }
+
+  const config = getTopicSequenceConfig();
+  const availableTopics = getAllTopicIds();
+  const nextTopicId = getNextTopicId(currentTopicId, availableTopics);
+  const seriesComplete = !nextTopicId || isLastTopic(currentTopicId, availableTopics);
+
+  const summary = buildTopicSummary();
+
+  const event: TopicCompleteEvent = {
+    type: "topicComplete",
+    topicId: currentTopicId,
+    topicTitle: topicIdToTitle(currentTopicId),
+    summary,
+    nextTopicId,
+    nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
+    autoAdvanceMs: config.autoAdvance ? config.topicSummaryDisplayTimeMs : 0,
+    isSeriesComplete: seriesComplete && !config.loopOnComplete,
+  };
+
+  console.log(`[Controller] Topic complete: ${currentTopicId} -> ${nextTopicId ?? "END"}`);
+  
+  // Update state to show we're in topic summary mode
+  state.inTopicSummary = true;
+  state.summaryTopicId = currentTopicId;
+  
+  // Broadcast the topic complete event
+  broadcastEvent(event);
+
+  // Schedule auto-advance if enabled and there's a next topic
+  if (config.autoAdvance && nextTopicId && config.topicSummaryDisplayTimeMs > 0) {
+    clearTopicTransitionTimer();
+    state.topicTransitionTimer = setTimeout(() => {
+      startNextTopic(nextTopicId);
+    }, config.topicSummaryDisplayTimeMs);
+    console.log(`[Controller] Auto-advance scheduled in ${config.topicSummaryDisplayTimeMs}ms`);
+  }
+}
+
+/**
+ * Clear topic transition timer
+ */
+function clearTopicTransitionTimer(): void {
+  if (state.topicTransitionTimer) {
+    clearTimeout(state.topicTransitionTimer);
+    state.topicTransitionTimer = null;
+  }
+}
+
+/**
+ * Start the next topic in sequence
+ */
+export function startNextTopic(topicId: string): void {
+  console.log(`[Controller] Starting next topic: ${topicId}`);
+  
+  // Clear summary state
+  state.inTopicSummary = false;
+  state.summaryTopicId = null;
+  clearTopicTransitionTimer();
+  
+  // Reset scores and streaks for new topic (preserve registrations)
+  resetScoresAndStreaks();
+  clearPlayerStats();
+  
+  // Set new pool for the topic
+  const poolSize = setActivePool([topicId], false); // No shuffle - keep question order
+  
+  if (poolSize === 0) {
+    console.error(`[Controller] No questions found for topic: ${topicId}`);
+    return;
+  }
+  
+  // Reset to first question
+  state.questionIndex = 0;
+  
+  // Clear any pending timers
+  clearTimer();
+  
+  // Emit topicStart event so UI can reset its state
+  emitTopicStart(topicId);
+  
+  // Start the quiz for the new topic
+  if (state.running) {
+    enterOpenPhase();
+  } else {
+    console.log(`[Controller] Topic loaded but controller not running. Call start() to begin.`);
+    // Broadcast current state so UI updates
+    broadcastState();
+  }
+}
+
+/**
  * Advance to next question and enter OPEN phase
+ * Handles topic completion when reaching the last question
  */
 function advanceToNextQuestion(): void {
   // Clear answers for the completed question
   clearAnswersForQuestion(state.questionIndex);
 
-  // Advance to next question (loop at end)
-  state.questionIndex = (state.questionIndex + 1) % getTotalQuestions();
+  // Check if this was the last question in the topic
+  if (isLastQuestion()) {
+    console.log(`[Controller] Last question completed for topic`);
+    emitTopicComplete();
+    // Don't advance - wait for topic transition (auto or manual)
+    return;
+  }
+
+  // Advance to next question
+  state.questionIndex = state.questionIndex + 1;
 
   console.log(`[Controller] Advancing to Q${state.questionIndex + 1}`);
 
@@ -297,16 +479,44 @@ export function skipToNext(): void {
  */
 export function reset(): void {
   clearTimer();
+  clearTopicTransitionTimer();
   state.running = false;
   state.questionIndex = 0;
   state.phase = "OPEN";
   state.endsAtMs = 0;
   state.openStartMs = 0;
+  state.inTopicSummary = false;
+  state.summaryTopicId = null;
 
   resetAllPlayers();
+  clearPlayerStats();
 
   console.log("[Controller] Reset complete");
   broadcastState();
+}
+
+/**
+ * Handle active pool updates without resetting player scores.
+ * Starts from Q1 of the new pool so answer indexing stays consistent.
+ */
+export function onPoolUpdated(): void {
+  state.questionIndex = 0;
+  state.inTopicSummary = false;
+  state.summaryTopicId = null;
+  clearTopicTransitionTimer();
+
+  if (!state.running) {
+    state.phase = "OPEN";
+    state.endsAtMs = 0;
+    state.openStartMs = 0;
+    console.log("[Controller] Pool updated (idle) - reset to Q1");
+    broadcastState();
+    return;
+  }
+
+  clearTimer();
+  console.log("[Controller] Pool updated (running) - restarting from Q1");
+  enterOpenPhase();
 }
 
 /**
@@ -317,17 +527,162 @@ export function getStatus(): {
   phase: QuizPhase;
   questionIndex: number;
   totalQuestions: number;
+  questionSource: "active_pool" | "legacy_fallback";
+  scoringMode: "flat" | "v2";
   endsAtMs: number;
   timeRemainingMs: number;
   connectedClients: number;
+  inTopicSummary: boolean;
+  currentTopicId: string | null;
+  summaryTopicId: string | null;
 } {
+  const activePoolSize = getActivePoolSize();
   return {
     running: state.running,
     phase: state.phase,
     questionIndex: state.questionIndex,
     totalQuestions: getTotalQuestions(),
+    questionSource: activePoolSize > 0 ? "active_pool" : "legacy_fallback",
+    scoringMode: getScoringMode(),
     endsAtMs: state.endsAtMs,
     timeRemainingMs: Math.max(0, state.endsAtMs - Date.now()),
     connectedClients: getClientCount(),
+    inTopicSummary: state.inTopicSummary,
+    currentTopicId: getActiveTopicId(),
+    summaryTopicId: state.summaryTopicId,
   };
+}
+
+/**
+ * Check if currently in topic summary display mode
+ */
+export function isInTopicSummary(): boolean {
+  return state.inTopicSummary;
+}
+
+/**
+ * Get pending next topic ID (if in summary and auto-advance scheduled)
+ */
+export function getPendingNextTopic(): string | null {
+  if (!state.inTopicSummary) return null;
+  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+  if (!currentTopicId) return null;
+  return getNextTopicId(currentTopicId, getAllTopicIds());
+}
+
+/**
+ * Cancel auto-advance and stay on topic summary screen
+ * Admin can then manually start next topic when ready
+ */
+export function cancelAutoAdvance(): void {
+  clearTopicTransitionTimer();
+  console.log("[Controller] Auto-advance cancelled");
+}
+
+/**
+ * Emit topic start event to all clients
+ */
+function emitTopicStart(topicId: string): void {
+  const config = getTopicSequenceConfig();
+  const availableTopics = getAllTopicIds();
+  const sequence = config.topicSequence.length > 0 
+    ? config.topicSequence 
+    : availableTopics.sort();
+  
+  const topicIndex = sequence.indexOf(topicId);
+  
+  const event: TopicStartEvent = {
+    type: "topicStart",
+    topicId,
+    topicTitle: topicIdToTitle(topicId),
+    topicIndex: topicIndex >= 0 ? topicIndex : 0,
+    totalTopics: sequence.length,
+  };
+  
+  console.log(`[Controller] Emitting topicStart: ${topicId}`);
+  broadcastEvent(event);
+}
+
+/**
+ * Emit topic countdown event and schedule topic start
+ */
+export function emitTopicCountdown(topicId: string, countdownSeconds: number): void {
+  const endsAtMs = Date.now() + (countdownSeconds * 1000);
+  
+  const event: TopicCountdownEvent = {
+    type: "topicCountdown",
+    topicId,
+    topicTitle: topicIdToTitle(topicId),
+    countdownSeconds,
+    endsAtMs,
+  };
+  
+  console.log(`[Controller] Emitting topicCountdown: ${countdownSeconds}s for ${topicId}`);
+  broadcastEvent(event);
+  
+  // Clear any existing timers
+  clearTimer();
+  clearTopicTransitionTimer();
+  
+  // Schedule topic start after countdown
+  state.topicTransitionTimer = setTimeout(() => {
+    startNextTopic(topicId);
+  }, countdownSeconds * 1000);
+}
+
+/**
+ * Skip current topic and move to the next without showing summary
+ * Resets scores/streaks and starts next topic immediately
+ */
+export function skipCurrentTopic(): { success: boolean; nextTopicId: string | null } {
+  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+  
+  if (!currentTopicId) {
+    console.log("[Controller] No active topic to skip");
+    return { success: false, nextTopicId: null };
+  }
+  
+  const nextTopicId = getNextTopicId(currentTopicId, getAllTopicIds());
+  
+  if (!nextTopicId) {
+    console.log("[Controller] No next topic available to skip to");
+    return { success: false, nextTopicId: null };
+  }
+  
+  console.log(`[Controller] Skipping topic ${currentTopicId} -> ${nextTopicId}`);
+  
+  // Clear summary state and timers
+  state.inTopicSummary = false;
+  state.summaryTopicId = null;
+  clearTopicTransitionTimer();
+  
+  // Start the next topic (this will reset scores/streaks)
+  startNextTopic(nextTopicId);
+  
+  return { success: true, nextTopicId };
+}
+
+/**
+ * Replay the current topic from the beginning
+ * Resets scores/streaks and restarts same topic
+ */
+export function replayTopic(): { success: boolean; topicId: string | null } {
+  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+  
+  if (!currentTopicId) {
+    console.log("[Controller] No active topic to replay");
+    return { success: false, topicId: null };
+  }
+  
+  console.log(`[Controller] Replaying topic: ${currentTopicId}`);
+  
+  // Clear summary state and timers
+  state.inTopicSummary = false;
+  state.summaryTopicId = null;
+  clearTopicTransitionTimer();
+  
+  // Start the same topic (this will reset scores/streaks)
+  startNextTopic(currentTopicId);
+  
+  return { success: true, topicId: currentTopicId };
 }

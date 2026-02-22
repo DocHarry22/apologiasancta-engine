@@ -289,7 +289,12 @@ export function evaluateAnswers(
     const player = players.get(odUserId);
     if (!player) return;
 
-    if (answer.choiceId.toLowerCase() === normalizedCorrectId) {
+    const isCorrect = answer.choiceId.toLowerCase() === normalizedCorrectId;
+    
+    // Record for topic statistics
+    recordAnswerResult(odUserId, isCorrect);
+
+    if (isCorrect) {
       const details = calculateScoreDetails({
         isCorrect: true,
         difficulty: context.difficulty,
@@ -362,6 +367,14 @@ export function clearAnswersForQuestion(questionIndex: number): void {
 }
 
 /**
+ * Clear all pending answers across all question indexes.
+ * Useful when replacing the active question pool.
+ */
+export function clearAllAnswers(): void {
+  questionAnswers.clear();
+}
+
+/**
  * Reset all player data (scores, streaks, answers)
  * Note: Also clears username mappings
  */
@@ -431,4 +444,132 @@ export function getPlayerInfo(userId: string): PlayerInfo | undefined {
     rank: getPlayerRank(userId),
     distanceToTop10: getDistanceToTop10(userId),
   };
+}
+
+// ============== Topic Summary Statistics ==============
+
+/** Track correct/total answers per player for stats calculation */
+const playerCorrectCounts: Map<string, { correct: number; total: number }> = new Map();
+
+/**
+ * Record a player's answer result for statistics
+ * Called during evaluateAnswers
+ */
+export function recordAnswerResult(userId: string, isCorrect: boolean): void {
+  const counts = playerCorrectCounts.get(userId) || { correct: 0, total: 0 };
+  counts.total += 1;
+  if (isCorrect) {
+    counts.correct += 1;
+  }
+  playerCorrectCounts.set(userId, counts);
+}
+
+/**
+ * Clear player answer statistics (called on topic/series reset)
+ */
+export function clearPlayerStats(): void {
+  playerCorrectCounts.clear();
+}
+
+/**
+ * Get top scorers with streak info for topic summary
+ */
+export function getTopScorersWithStreaks(limit: number = 10): Array<{
+  rank: number;
+  name: string;
+  score: number;
+  streak: number;
+}> {
+  const sorted = Array.from(players.values())
+    .filter((p) => p.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return sorted.map((p, i) => ({
+    rank: i + 1,
+    name: p.username,
+    score: p.score,
+    streak: p.streak,
+  }));
+}
+
+/**
+ * Get top streaks with scores for topic summary
+ */
+export function getTopStreaksWithScores(limit: number = 5): Array<{
+  rank: number;
+  name: string;
+  streak: number;
+  score: number;
+}> {
+  const sorted = Array.from(players.values())
+    .filter((p) => p.streak > 0)
+    .sort((a, b) => b.streak - a.streak)
+    .slice(0, limit);
+
+  return sorted.map((p, i) => ({
+    rank: i + 1,
+    name: p.username,
+    streak: p.streak,
+    score: p.score,
+  }));
+}
+
+/**
+ * Get topic summary statistics
+ */
+export function getTopicStats(): {
+  averageCorrectPct: number;
+  totalParticipants: number;
+  maxScore: number;
+} {
+  const participants = Array.from(players.values()).filter(
+    (p) => playerCorrectCounts.has(p.userId) || p.score > 0
+  );
+  
+  if (participants.length === 0) {
+    return {
+      averageCorrectPct: 0,
+      totalParticipants: 0,
+      maxScore: 0,
+    };
+  }
+
+  // Calculate average correct percentage
+  let totalCorrectPct = 0;
+  let playersWithAnswers = 0;
+  
+  for (const player of participants) {
+    const counts = playerCorrectCounts.get(player.userId);
+    if (counts && counts.total > 0) {
+      totalCorrectPct += (counts.correct / counts.total) * 100;
+      playersWithAnswers++;
+    }
+  }
+
+  const averageCorrectPct = playersWithAnswers > 0
+    ? Math.round(totalCorrectPct / playersWithAnswers)
+    : 0;
+
+  const maxScore = Math.max(0, ...participants.map((p) => p.score));
+
+  return {
+    averageCorrectPct,
+    totalParticipants: participants.length,
+    maxScore,
+  };
+}
+
+/**
+ * Reset scores and streaks but preserve player registrations
+ * Used for topic transitions
+ */
+export function resetScoresAndStreaks(): void {
+  players.forEach((player) => {
+    player.score = 0;
+    player.streak = 0;
+  });
+  playerCorrectCounts.clear();
+  questionAnswers.clear();
+  console.log("[Players] Scores and streaks reset (registrations preserved)");
 }
