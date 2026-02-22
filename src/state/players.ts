@@ -2,10 +2,12 @@
  * Player state management - answers, scores, and streaks
  */
 
+import { calculateScoreDetails } from "../engine/scoring";
+
 /** Answer submitted by a player */
 export interface PlayerAnswer {
   choiceId: string;
-  timestamp: number;
+  answerTimeMs: number;
 }
 
 /** Player data */
@@ -67,7 +69,7 @@ export function submitAnswer(
   // Store answer
   answers.set(userId, {
     choiceId,
-    timestamp: Date.now(),
+    answerTimeMs: Date.now(),
   });
 
   console.log(`[Players] Answer accepted: ${name} chose ${choiceId} for Q${questionIndex}`);
@@ -84,7 +86,11 @@ export function getAnswersForQuestion(questionIndex: number): Map<string, Player
 /**
  * Evaluate answers and update scores/streaks
  */
-export function evaluateAnswers(questionIndex: number, correctId: string): void {
+export function evaluateAnswers(
+  questionIndex: number,
+  correctId: string,
+  context: { openStartMs: number; openDurationMs: number; difficulty: number | "easy" | "medium" | "hard" }
+): void {
   const answers = getAnswersForQuestion(questionIndex);
   
   // Track all players who participated in the quiz at any point
@@ -96,10 +102,21 @@ export function evaluateAnswers(questionIndex: number, correctId: string): void 
     if (!player) return;
 
     if (answer.choiceId === correctId) {
-      // Correct answer: +10 points, increment streak
-      player.score += 10;
+      const details = calculateScoreDetails({
+        isCorrect: true,
+        difficulty: context.difficulty,
+        answerTimeMs: answer.answerTimeMs,
+        openStartMs: context.openStartMs,
+        openDurationMs: context.openDurationMs,
+      });
+
+      player.score += details.score;
       player.streak += 1;
-      console.log(`[Scoring] ${player.name}: +10 pts, streak ${player.streak}`);
+      console.log(
+        `[Scoring] ${player.name}: +${details.score} pts, streak ${player.streak} ` +
+          `(mode=${details.mode}, difficulty=${details.difficulty}, f=${details.f.toFixed(3)}, ` +
+          `multiplier=${details.multiplier.toFixed(3)}, finalPoints=${details.score})`
+      );
     } else {
       // Wrong answer: reset streak
       player.streak = 0;

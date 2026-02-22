@@ -11,14 +11,127 @@ export interface ScoreResult {
   previousStreak: number;
 }
 
+export type ScoringMode = "flat" | "v2";
+
 export const POINTS_PER_CORRECT = 10;
+
+const RAW_SCORING_MODE = (process.env.SCORING_MODE || "flat").toLowerCase();
+const SCORING_MODE: ScoringMode = RAW_SCORING_MODE === "v2" ? "v2" : "flat";
+
+const DIFFICULTY_BONUS: Record<1 | 2 | 3 | 4 | 5, number> = {
+  1: 0,
+  2: 2,
+  3: 4,
+  4: 7,
+  5: 10,
+};
+
+export interface ScoreCalculationInput {
+  isCorrect: boolean;
+  difficulty?: number | "easy" | "medium" | "hard";
+  answerTimeMs?: number;
+  openStartMs?: number;
+  openDurationMs?: number;
+}
+
+export interface ScoreCalculationDetails {
+  mode: ScoringMode;
+  score: number;
+  basePoints: number;
+  difficulty: 1 | 2 | 3 | 4 | 5;
+  difficultyBonus: number;
+  subtotal: number;
+  f: number;
+  multiplier: number;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeDifficulty(difficulty?: number | "easy" | "medium" | "hard"): 1 | 2 | 3 | 4 | 5 {
+  if (typeof difficulty === "number" && Number.isFinite(difficulty)) {
+    const rounded = Math.round(difficulty);
+    return clamp(rounded, 1, 5) as 1 | 2 | 3 | 4 | 5;
+  }
+
+  if (difficulty === "easy") return 2;
+  if (difficulty === "hard") return 4;
+  if (difficulty === "medium") return 3;
+
+  return 3;
+}
+
+export function getScoringMode(): ScoringMode {
+  return SCORING_MODE;
+}
+
+export function calculateScoreDetails(input: ScoreCalculationInput): ScoreCalculationDetails {
+  const basePoints = POINTS_PER_CORRECT;
+  const difficulty = normalizeDifficulty(input.difficulty);
+  const difficultyBonus = DIFFICULTY_BONUS[difficulty];
+  const subtotal = basePoints + difficultyBonus;
+
+  const openDurationMs = input.openDurationMs && input.openDurationMs > 0
+    ? input.openDurationMs
+    : 1;
+
+  const openStartMs = input.openStartMs ?? input.answerTimeMs ?? Date.now();
+  const answerTimeMs = input.answerTimeMs ?? openStartMs;
+  const rawFraction = (answerTimeMs - openStartMs) / openDurationMs;
+  const f = clamp(rawFraction, 0, 1);
+  const multiplier = 1 + 0.5 * (1 - f) * (1 - f);
+
+  if (!input.isCorrect) {
+    return {
+      mode: SCORING_MODE,
+      score: 0,
+      basePoints,
+      difficulty,
+      difficultyBonus,
+      subtotal,
+      f,
+      multiplier,
+    };
+  }
+
+  if (SCORING_MODE === "flat") {
+    return {
+      mode: SCORING_MODE,
+      score: basePoints,
+      basePoints,
+      difficulty,
+      difficultyBonus,
+      subtotal,
+      f,
+      multiplier,
+    };
+  }
+
+  return {
+    mode: SCORING_MODE,
+    score: Math.round(subtotal * multiplier),
+    basePoints,
+    difficulty,
+    difficultyBonus,
+    subtotal,
+    f,
+    multiplier,
+  };
+}
 
 /**
  * Calculate score for a correct answer
  * Currently fixed at 10 points per correct answer
  */
-export function calculateScore(isCorrect: boolean): number {
-  return isCorrect ? POINTS_PER_CORRECT : 0;
+export function calculateScore(isCorrect: boolean): number;
+export function calculateScore(input: ScoreCalculationInput): number;
+export function calculateScore(isCorrectOrInput: boolean | ScoreCalculationInput): number {
+  if (typeof isCorrectOrInput === "boolean") {
+    return isCorrectOrInput ? POINTS_PER_CORRECT : 0;
+  }
+
+  return calculateScoreDetails(isCorrectOrInput).score;
 }
 
 /**

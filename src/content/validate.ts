@@ -13,7 +13,7 @@ export type UIChoiceId = "A" | "B" | "C" | "D";
 export interface UIQuestion {
   id: string;
   topicId: string;
-  difficulty?: "easy" | "medium" | "hard";
+  difficulty?: 1 | 2 | 3 | 4 | 5 | "easy" | "medium" | "hard";
   question: string;
   choices: {
     A: string;
@@ -96,8 +96,11 @@ export function validateQuestion(obj: unknown): ValidationResult {
 
   // Optional field validation
   if (q.difficulty !== undefined) {
-    if (!["easy", "medium", "hard"].includes(q.difficulty as string)) {
-      errors.push('difficulty must be one of "easy", "medium", "hard"');
+    const d = q.difficulty;
+    const validNumeric = typeof d === "number" && d >= 1 && d <= 5;
+    const validString = typeof d === "string" && ["easy", "medium", "hard"].includes(d);
+    if (!validNumeric && !validString) {
+      errors.push('difficulty must be 1-5 or one of "easy", "medium", "hard"');
     }
   }
 

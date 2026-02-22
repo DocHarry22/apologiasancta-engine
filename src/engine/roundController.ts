@@ -6,7 +6,7 @@
 
 import type { QuizState, QuizPhase } from "../types/quiz";
 import { getQuestion as getLegacyQuestion, getTotalQuestions as getLegacyTotal } from "../content/questions";
-import { getPoolQuestion, getActivePoolSize, isPoolEmpty } from "../content/bank";
+import { getPoolQuestion, getPoolEntry, getActivePoolSize, isPoolEmpty } from "../content/bank";
 import {
   evaluateAnswers,
   getTopScorers,
@@ -49,6 +49,7 @@ interface ControllerState {
   questionIndex: number;
   phase: QuizPhase;
   endsAtMs: number;
+  openStartMs: number;
   timer: NodeJS.Timeout | null;
 }
 
@@ -58,8 +59,17 @@ const state: ControllerState = {
   questionIndex: 0,
   phase: "OPEN",
   endsAtMs: 0,
+  openStartMs: 0,
   timer: null,
 };
+
+function getCurrentDifficulty(): number {
+  const poolEntry = getPoolEntry(state.questionIndex);
+  if (poolEntry) {
+    return poolEntry.difficulty;
+  }
+  return 3;
+}
 
 /**
  * Build QuizState from current controller state
@@ -144,7 +154,8 @@ function scheduleNextPhase(delayMs: number, callback: () => void): void {
  */
 function enterOpenPhase(): void {
   state.phase = "OPEN";
-  state.endsAtMs = Date.now() + OPEN_SECONDS * 1000;
+  state.openStartMs = Date.now();
+  state.endsAtMs = state.openStartMs + OPEN_SECONDS * 1000;
 
   console.log(
     `[Controller] OPEN phase - Q${state.questionIndex + 1} (${OPEN_SECONDS}s)`
@@ -173,7 +184,11 @@ function enterLockedPhase(): void {
 function enterRevealPhase(): void {
   // Evaluate answers before revealing
   const questionData = getQuestion(state.questionIndex);
-  evaluateAnswers(state.questionIndex, questionData.correctId);
+  evaluateAnswers(state.questionIndex, questionData.correctId, {
+    openStartMs: state.openStartMs,
+    openDurationMs: OPEN_SECONDS * 1000,
+    difficulty: getCurrentDifficulty(),
+  });
 
   state.phase = "REVEAL";
   state.endsAtMs = Date.now() + REVEAL_SECONDS * 1000;
@@ -286,6 +301,7 @@ export function reset(): void {
   state.questionIndex = 0;
   state.phase = "OPEN";
   state.endsAtMs = 0;
+  state.openStartMs = 0;
 
   resetAllPlayers();
 

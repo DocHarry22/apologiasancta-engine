@@ -12,7 +12,7 @@ import { UIQuestion, normalizeToEngine } from "./validate";
 export interface BankEntry {
   id: string;
   topicId: string;
-  difficulty: "easy" | "medium" | "hard";
+  difficulty: 1 | 2 | 3 | 4 | 5;
   engineFormat: QuestionData;
   originalQuestion: UIQuestion;
 }
@@ -29,6 +29,21 @@ const topicIndex: Map<string, Set<string>> = new Map();
 
 // Active question pool for current quiz set
 let activePool: BankEntry[] = [];
+
+function normalizeDifficultyLevel(
+  difficulty?: UIQuestion["difficulty"]
+): 1 | 2 | 3 | 4 | 5 {
+  if (typeof difficulty === "number" && Number.isFinite(difficulty)) {
+    const rounded = Math.round(difficulty);
+    if (rounded < 1) return 1;
+    if (rounded > 5) return 5;
+    return rounded as 1 | 2 | 3 | 4 | 5;
+  }
+
+  if (difficulty === "easy") return 2;
+  if (difficulty === "hard") return 4;
+  return 3;
+}
 
 /**
  * Ingest a batch of UI questions into the bank
@@ -49,7 +64,7 @@ export function ingestQuestions(questions: UIQuestion[]): {
     const entry: BankEntry = {
       id: q.id,
       topicId: q.topicId,
-      difficulty: q.difficulty || "medium",
+      difficulty: normalizeDifficultyLevel(q.difficulty),
       engineFormat: normalizeToEngine(q),
       originalQuestion: q,
     };
