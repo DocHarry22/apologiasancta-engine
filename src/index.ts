@@ -5,19 +5,20 @@
 import "dotenv/config";
 import { createApp, allowedOrigins } from "./app";
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+const port = Number(process.env.PORT ?? 4000);
+const host = "0.0.0.0";
 const OPEN_SECONDS = process.env.OPEN_SECONDS || "25";
 const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
 
 const app = createApp();
 
-app.listen(PORT, () => {
+app.listen(port, host, () => {
   const ytConfigured = process.env.YOUTUBE_API_KEY ? "✓" : "✗";
   console.log(`
 ╔═══════════════════════════════════════════════════════╗
 ║     Apologia Sancta Engine v1.0                       ║
-║     Running on http://localhost:${PORT}                  ║
+║     Listening on ${host}:${port}                         ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Endpoints:                                           ║
 ║    GET  /health    - Health check                     ║
