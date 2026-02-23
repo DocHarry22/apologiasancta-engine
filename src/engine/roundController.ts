@@ -5,12 +5,13 @@
  * 
  * Topic Completion Flow:
  * When last question of a topic is REVEALED, the controller:
- * 1. Emits topicComplete event with summary data
- * 2. Optionally auto-advances to next topic after delay
- * 3. Resets scores/streaks for the new topic
+ * 1. Emits congrats event (5s display)
+ * 2. After congrats, emits countdown event (10s default)
+ * 3. After countdown, starts next topic
+ * 4. Handles repeat/loop modes for topic and series
  */
 
-import type { QuizState, QuizPhase, TopicCompleteEvent, TopicSummary, TopicStartEvent, TopicCountdownEvent } from "../types/quiz";
+import type { QuizState, QuizPhase, TopicCompleteEvent, TopicSummary, TopicStartEvent, TopicCountdownEvent, CongratsEvent } from "../types/quiz";
 import { getQuestion as getLegacyQuestion, getTotalQuestions as getLegacyTotal } from "../content/questions";
 import { 
   getPoolQuestion, 
@@ -42,6 +43,11 @@ import {
   getNextTopicId,
   getFirstTopicId,
   isLastTopic,
+  shouldRepeatTopic,
+  shouldRepeatSeries,
+  setTopicLoopMode,
+  setSeriesLoopMode,
+  setCountdownSeconds,
 } from "../config/topicSequence";
 
 /** Phase durations from environment (in seconds) */
@@ -79,12 +85,22 @@ interface ControllerState {
   endsAtMs: number;
   openStartMs: number;
   timer: NodeJS.Timeout | null;
+  /** Congrats display timer */
+  congratsTimer: NodeJS.Timeout | null;
+  /** Countdown timer before next topic */
+  countdownTimer: NodeJS.Timeout | null;
   /** Auto-advance timer for topic transitions */
   topicTransitionTimer: NodeJS.Timeout | null;
+  /** Whether we're showing congrats message */
+  inCongrats: boolean;
+  /** Whether we're in countdown mode */
+  inCountdown: boolean;
   /** Whether we're in topic summary display mode */
   inTopicSummary: boolean;
   /** Current topic being displayed in summary (for UI state) */
   summaryTopicId: string | null;
+  /** Pending next topic ID for transition */
+  pendingNextTopicId: string | null;
 }
 
 /** Current controller state */
@@ -95,9 +111,14 @@ const state: ControllerState = {
   endsAtMs: 0,
   openStartMs: 0,
   timer: null,
+  congratsTimer: null,
+  countdownTimer: null,
   topicTransitionTimer: null,
+  inCongrats: false,
+  inCountdown: false,
   inTopicSummary: false,
   summaryTopicId: null,
+  pendingNextTopicId: null,
 };
 
 function getCurrentDifficulty(): number {
@@ -276,7 +297,115 @@ function buildTopicSummary(): TopicSummary {
 }
 
 /**
+ * Determine the next topic based on repeat/loop settings
+ */
+function determineNextTopic(currentTopicId: string): string | null {
+  const availableTopics = getAllTopicIds();
+  
+  // Check if we should repeat the current topic
+  if (shouldRepeatTopic()) {
+    console.log(`[Controller] Topic loop mode active - repeating ${currentTopicId}`);
+    return currentTopicId;
+  }
+  
+  // Check for next topic in sequence
+  const nextTopicId = getNextTopicId(currentTopicId, availableTopics);
+  
+  // If series complete, check if we should loop
+  if (!nextTopicId && shouldRepeatSeries()) {
+    console.log(`[Controller] Series loop mode active - restarting from first topic`);
+    return getFirstTopicId(availableTopics);
+  }
+  
+  return nextTopicId;
+}
+
+/**
+ * Clear all topic transition timers
+ */
+function clearAllTransitionTimers(): void {
+  if (state.congratsTimer) {
+    clearTimeout(state.congratsTimer);
+    state.congratsTimer = null;
+  }
+  if (state.countdownTimer) {
+    clearTimeout(state.countdownTimer);
+    state.countdownTimer = null;
+  }
+  if (state.topicTransitionTimer) {
+    clearTimeout(state.topicTransitionTimer);
+    state.topicTransitionTimer = null;
+  }
+}
+
+/**
+ * Emit congrats event and schedule countdown
+ */
+function emitCongratsAndScheduleCountdown(
+  currentTopicId: string,
+  nextTopicId: string | null,
+  summary: TopicSummary,
+  isSeriesComplete: boolean
+): void {
+  const config = getTopicSequenceConfig();
+  
+  const congratsEvent: CongratsEvent = {
+    type: "congrats",
+    topicId: currentTopicId,
+    topicTitle: topicIdToTitle(currentTopicId),
+    summary,
+    displayDurationMs: config.congratsDisplayTimeMs,
+    endsAtMs: Date.now() + config.congratsDisplayTimeMs,
+    nextTopicId,
+    nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
+    isSeriesComplete,
+  };
+  
+  console.log(`[Controller] Emitting congrats for ${currentTopicId} (${config.congratsDisplayTimeMs}ms)`);
+  
+  state.inCongrats = true;
+  state.pendingNextTopicId = nextTopicId;
+  broadcastEvent(congratsEvent);
+  
+  // Schedule countdown after congrats (if auto-advance enabled and next topic exists)
+  if (config.autoAdvance && nextTopicId) {
+    state.congratsTimer = setTimeout(() => {
+      state.inCongrats = false;
+      emitCountdownForTopic(nextTopicId);
+    }, config.congratsDisplayTimeMs);
+  }
+}
+
+/**
+ * Emit countdown event and schedule topic start
+ */
+function emitCountdownForTopic(topicId: string): void {
+  const config = getTopicSequenceConfig();
+  const countdownSeconds = config.countdownSeconds;
+  
+  const event: TopicCountdownEvent = {
+    type: "topicCountdown",
+    topicId,
+    topicTitle: topicIdToTitle(topicId),
+    countdownSeconds,
+    endsAtMs: Date.now() + (countdownSeconds * 1000),
+  };
+  
+  console.log(`[Controller] Emitting countdown (${countdownSeconds}s) for ${topicId}`);
+  
+  state.inCountdown = true;
+  broadcastEvent(event);
+  
+  // Schedule topic start after countdown
+  state.countdownTimer = setTimeout(() => {
+    state.inCountdown = false;
+    startNextTopic(topicId);
+  }, countdownSeconds * 1000);
+}
+
+/**
  * Emit topic complete event and handle transition
+ * Flow: topicComplete → congrats (5s) → countdown (10s) → next topic
  */
 function emitTopicComplete(): void {
   const currentTopicId = getActiveTopicId();
@@ -286,12 +415,14 @@ function emitTopicComplete(): void {
   }
 
   const config = getTopicSequenceConfig();
-  const availableTopics = getAllTopicIds();
-  const nextTopicId = getNextTopicId(currentTopicId, availableTopics);
-  const seriesComplete = !nextTopicId || isLastTopic(currentTopicId, availableTopics);
-
   const summary = buildTopicSummary();
+  
+  // Determine next topic (considers repeat/loop settings)
+  const nextTopicId = determineNextTopic(currentTopicId);
+  const availableTopics = getAllTopicIds();
+  const isSeriesComplete = !nextTopicId && isLastTopic(currentTopicId, availableTopics);
 
+  // Legacy topicComplete event for backwards compatibility
   const event: TopicCompleteEvent = {
     type: "topicComplete",
     topicId: currentTopicId,
@@ -299,8 +430,8 @@ function emitTopicComplete(): void {
     summary,
     nextTopicId,
     nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
-    autoAdvanceMs: config.autoAdvance ? config.topicSummaryDisplayTimeMs : 0,
-    isSeriesComplete: seriesComplete && !config.loopOnComplete,
+    autoAdvanceMs: config.autoAdvance ? (config.congratsDisplayTimeMs + config.countdownSeconds * 1000) : 0,
+    isSeriesComplete,
   };
 
   console.log(`[Controller] Topic complete: ${currentTopicId} -> ${nextTopicId ?? "END"}`);
@@ -309,17 +440,12 @@ function emitTopicComplete(): void {
   state.inTopicSummary = true;
   state.summaryTopicId = currentTopicId;
   
-  // Broadcast the topic complete event
+  // Broadcast the topic complete event (for backwards compat)
   broadcastEvent(event);
 
-  // Schedule auto-advance if enabled and there's a next topic
-  if (config.autoAdvance && nextTopicId && config.topicSummaryDisplayTimeMs > 0) {
-    clearTopicTransitionTimer();
-    state.topicTransitionTimer = setTimeout(() => {
-      startNextTopic(nextTopicId);
-    }, config.topicSummaryDisplayTimeMs);
-    console.log(`[Controller] Auto-advance scheduled in ${config.topicSummaryDisplayTimeMs}ms`);
-  }
+  // Start the congrats → countdown → next topic flow
+  clearAllTransitionTimers();
+  emitCongratsAndScheduleCountdown(currentTopicId, nextTopicId, summary, isSeriesComplete);
 }
 
 /**
@@ -338,10 +464,13 @@ function clearTopicTransitionTimer(): void {
 export function startNextTopic(topicId: string): void {
   console.log(`[Controller] Starting next topic: ${topicId}`);
   
-  // Clear summary state
+  // Clear all transition state
   state.inTopicSummary = false;
   state.summaryTopicId = null;
-  clearTopicTransitionTimer();
+  state.inCongrats = false;
+  state.inCountdown = false;
+  state.pendingNextTopicId = null;
+  clearAllTransitionTimers();
   
   // Reset scores and streaks for new topic (preserve registrations)
   resetScoresAndStreaks();
@@ -575,7 +704,9 @@ export function getPendingNextTopic(): string | null {
  * Admin can then manually start next topic when ready
  */
 export function cancelAutoAdvance(): void {
-  clearTopicTransitionTimer();
+  clearAllTransitionTimers();
+  state.inCongrats = false;
+  state.inCountdown = false;
   console.log("[Controller] Auto-advance cancelled");
 }
 

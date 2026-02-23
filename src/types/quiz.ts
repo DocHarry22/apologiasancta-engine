@@ -193,3 +193,39 @@ export interface TopicCountdownEvent {
   /** Unix timestamp (ms) when countdown ends */
   endsAtMs: number;
 }
+
+/** Congrats display event - shown after topic completion before countdown */
+export interface CongratsEvent {
+  type: "congrats";
+  /** Topic ID that was just completed */
+  topicId: string;
+  /** Topic display title */
+  topicTitle: string;
+  /** Summary data for display */
+  summary: TopicSummary;
+  /** Duration to display in ms */
+  displayDurationMs: number;
+  /** Unix timestamp (ms) when congrats ends */
+  endsAtMs: number;
+  /** Next topic ID (null if series complete) */
+  nextTopicId: string | null;
+  /** Next topic display title (null if series complete) */
+  nextTopicTitle: string | null;
+  /** Whether this is the last topic in the series */
+  isSeriesComplete: boolean;
+}
+
+/** Loop mode configuration */
+export type LoopMode = "off" | "once" | "infinite" | number;
+
+/** Repeat/Loop configuration for topic and series */
+export interface RepeatConfig {
+  /** Loop mode for current topic */
+  topicLoopMode: LoopMode;
+  /** Remaining topic repeats (for numbered mode) */
+  topicRepeatsRemaining: number;
+  /** Loop mode for all topics */
+  seriesLoopMode: LoopMode;
+  /** Remaining series repeats (for numbered mode) */
+  seriesRepeatsRemaining: number;
+}

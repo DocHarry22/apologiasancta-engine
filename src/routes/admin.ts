@@ -23,7 +23,11 @@ import { getAllTopicIds, topicIdToTitle } from "../content/bank";
 import {
   getTopicSequenceConfig,
   setTopicSequenceConfig,
+  setTopicLoopMode,
+  setSeriesLoopMode,
+  setCountdownSeconds,
 } from "../config/topicSequence";
+import type { LoopMode } from "../types/quiz";
 
 const router = Router();
 
@@ -354,6 +358,125 @@ router.post("/topic/sequence", (req: Request, res: Response) => {
   return res.json({
     success: true,
     config: newConfig,
+  });
+});
+
+// ============== Loop & Repeat Control Routes ==============
+
+/**
+ * POST /admin/topic/loop - Set topic loop mode
+ * Controls whether current topic repeats
+ * 
+ * Body:
+ *   mode: "off" | "once" | "infinite" | number
+ *   - "off": No repeat, proceed to next topic
+ *   - "once": Repeat current topic one time then proceed
+ *   - "infinite": Loop current topic indefinitely
+ *   - number: Repeat N times then proceed
+ */
+router.post("/topic/loop", (req: Request, res: Response) => {
+  const { mode } = req.body || {};
+  
+  // Validate mode
+  if (mode === undefined) {
+    return res.status(400).json({
+      error: "Missing required field: mode",
+      validModes: ["off", "once", "infinite", "<number>"],
+    });
+  }
+  
+  // Parse mode
+  let loopMode: LoopMode;
+  if (mode === "off" || mode === "once" || mode === "infinite") {
+    loopMode = mode;
+  } else if (typeof mode === "number" && mode >= 0) {
+    loopMode = mode;
+  } else if (typeof mode === "string" && !isNaN(parseInt(mode))) {
+    loopMode = parseInt(mode);
+  } else {
+    return res.status(400).json({
+      error: `Invalid mode: ${mode}`,
+      validModes: ["off", "once", "infinite", "<number>"],
+    });
+  }
+  
+  const config = setTopicLoopMode(loopMode);
+  return res.json({
+    success: true,
+    message: `Topic loop mode set to: ${loopMode}`,
+    topicLoopMode: config.topicLoopMode,
+    topicRepeatsRemaining: config.topicRepeatsRemaining,
+  });
+});
+
+/**
+ * POST /admin/series/loop - Set series loop mode  
+ * Controls whether entire topic sequence repeats
+ * 
+ * Body:
+ *   mode: "off" | "once" | "infinite" | number
+ */
+router.post("/series/loop", (req: Request, res: Response) => {
+  const { mode } = req.body || {};
+  
+  if (mode === undefined) {
+    return res.status(400).json({
+      error: "Missing required field: mode",
+      validModes: ["off", "once", "infinite", "<number>"],
+    });
+  }
+  
+  let loopMode: LoopMode;
+  if (mode === "off" || mode === "once" || mode === "infinite") {
+    loopMode = mode;
+  } else if (typeof mode === "number" && mode >= 0) {
+    loopMode = mode;
+  } else if (typeof mode === "string" && !isNaN(parseInt(mode))) {
+    loopMode = parseInt(mode);
+  } else {
+    return res.status(400).json({
+      error: `Invalid mode: ${mode}`,
+      validModes: ["off", "once", "infinite", "<number>"],
+    });
+  }
+  
+  const config = setSeriesLoopMode(loopMode);
+  return res.json({
+    success: true,
+    message: `Series loop mode set to: ${loopMode}`,
+    seriesLoopMode: config.seriesLoopMode,
+    seriesRepeatsRemaining: config.seriesRepeatsRemaining,
+  });
+});
+
+/**
+ * POST /admin/countdown/set - Set countdown duration
+ * 
+ * Body:
+ *   seconds: number (1-60)
+ */
+router.post("/countdown/set", (req: Request, res: Response) => {
+  const secondsRaw = req.body?.seconds;
+  
+  if (secondsRaw === undefined) {
+    return res.status(400).json({
+      error: "Missing required field: seconds",
+    });
+  }
+  
+  const seconds = typeof secondsRaw === "number" ? secondsRaw : parseInt(secondsRaw);
+  
+  if (isNaN(seconds) || seconds < 1 || seconds > 60) {
+    return res.status(400).json({
+      error: "seconds must be between 1 and 60",
+    });
+  }
+  
+  const config = setCountdownSeconds(seconds);
+  return res.json({
+    success: true,
+    message: `Countdown duration set to ${seconds}s`,
+    countdownSeconds: config.countdownSeconds,
   });
 });
 
