@@ -1,40 +1,49 @@
 # Apologia Sancta Engine
 
-Backend engine for **Apologia Sancta Live** — a real-time theology quiz platform supporting YouTube Live Chat integration and mobile play.
+Backend runtime for Apologia Sancta Live, a room-aware theology battle trivia platform with SSE delivery, mobile and YouTube answer ingestion, leaderboard windows, and restart-safe runtime persistence.
+
+## Release Baseline
+
+- Shared live question stream across active rooms
+- Room-scoped memberships, answers, scores, streaks, and leaderboard views
+- Global identity for players across room switches
+- Daily, weekly, and all-time leaderboard buckets
+- Restart recovery that restores the checkpoint in paused mode
+
+The current release does not isolate topic-flow sequencing per room. Live topic progression is still shared engine-wide.
 
 ## Features
 
-- **Real-time Quiz Engine** — State machine controlling OPEN → LOCKED → REVEAL phases
-- **YouTube Live Chat Integration** — Poll YouTube chat for `!A`, `!B`, `!C`, `!D` answers
-- **Server-Sent Events (SSE)** — Real-time state broadcast to all connected clients
-- **Unified Leaderboard** — Single scoreboard for YouTube + mobile players
-- **Personalized SSE Streams** — Optional `?userId=` parameter for personal rank/score
-- **Scoring System** — Time-based scoring with difficulty multipliers and streaks
-- **Runtime Persistence** — Rooms, memberships, players, and leaderboard history survive engine restarts
+- Multi-room battle trivia runtime with a pinned global room plus admin-created player rooms
+- SSE streams for global, personalized, and room-specific state delivery
+- Room-scoped leaderboard endpoints for `daily`, `weekly`, and `all-time`
+- Time-based scoring with difficulty multipliers and streak tracking
+- Runtime persistence for content, room registry, memberships, players, score history, and controller checkpoints
+- Restart restore that clears transient congrats/countdown transitions and waits for an admin resume
+- YouTube Live Chat polling for `!A`, `!B`, `!C`, and `!D` answers
+- Content/topic management endpoints used by the authoring UI
+- Backend verification suite runnable with `npm test`
 
 ## Architecture
 
 ```
-YouTube Live Chat                Mobile /mobile
-       │                              │
-       ▼ (poll every 5-10s)           ▼ POST /answer
-┌─────────────────────────────────────────────────────┐
-│  YouTubePoller ──► players.submitAnswer() ◄────────┤
-│                           │                         │
-│                    players Map<userId, Player>      │
-│                           │                         │
-│                    ┌──────┴──────┐                  │
-│                    ▼             ▼                  │
-│             getTopScorers()  getTopStreaks()        │
-│                    └──────┬──────┘                  │
-│                           ▼                         │
-│                    SSE broadcast()                  │
-│                    ├─ /events (global)              │
-│                    └─ /events?userId=... (personal) │
-└─────────────────────────────────────────────────────┘
-       │                              │
-       ▼                              ▼
-  OBS Overlay                   Mobile UI
+YouTube Live Chat                  Mobile / UI clients
+       │                                   │
+       ▼                                   ▼
+┌───────────────────────────────────────────────────────────────┐
+│ Express routes                                                │
+│  /events   /state   /register   /answer   /rooms   /admin     │
+├───────────────────────────────────────────────────────────────┤
+│ Shared round controller                                        │
+│  OPEN -> LOCKED -> REVEAL                                      │
+│  shared topic flow across active rooms                         │
+├───────────────────────────────────────────────────────────────┤
+│ Room-aware runtime state                                       │
+│  rooms  memberships  players  scores  streaks  leaderboard     │
+├───────────────────────────────────────────────────────────────┤
+│ Persistence snapshot                                           │
+│  content bank  pools  topic sequence  checkpoints  score log   │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Setup
@@ -42,7 +51,7 @@ YouTube Live Chat                Mobile /mobile
 ### Prerequisites
 
 - Node.js 18+
-- npm or yarn
+- npm
 
 ### Installation
 
@@ -64,152 +73,166 @@ ALLOWED_ORIGIN=http://localhost:3000,https://your-domain.com
 # Admin
 ADMIN_TOKEN=your-secure-admin-token
 
-# YouTube Integration (optional)
+# YouTube integration (optional)
 YOUTUBE_API_KEY=AIza...your_key
 YOUTUBE_VIDEO_ID=optional_default_video_id
 
-# Phase Durations (seconds)
+# Phase durations in seconds
 OPEN_SECONDS=25
 LOCK_SECONDS=2
 REVEAL_SECONDS=12
 
-# Runtime persistence (optional)
+# Runtime persistence (optional but recommended)
 STATE_FILE_PATH=./data/runtime-state.json
 ```
 
 ### Running
 
 ```bash
-# Development (with hot reload)
+# Development
 npm run dev
+
+# Verification
+npm test
 
 # Production
 npm run build
 npm start
 ```
 
-## API Endpoints
+## Public API
 
-### Public
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/state` | GET | Current quiz state |
-| `/events` | GET | SSE stream (global) |
-| `/events?userId=...` | GET | SSE stream (personalized) |
-| `/answer` | POST | Submit answer |
-| `/register` | POST | Register username (mobile) |
-| `/register/me?userId=...` | GET | Get player info |
-| `/register/rank?userId=...` | GET | Get player rank |
-| `/register/check?username=...` | GET | Check username availability |
-| `/leaderboard?period=all-time\|daily\|weekly` | GET | Global leaderboard snapshots |
-| `/rooms/:roomId/leaderboard?period=all-time\|daily\|weekly` | GET | Room leaderboard snapshots |
-
-### Admin (requires `x-admin-token` header)
+### Core state and events
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/admin/start` | POST | Start quiz |
-| `/admin/resume` | POST | Resume from restored quiz checkpoint |
-| `/admin/pause` | POST | Pause quiz |
-| `/admin/skip` | POST | Skip to next question |
-| `/admin/reset` | POST | Reset all scores |
-| `/admin/persistence/save` | POST | Force-save current runtime snapshot |
-| `/admin/youtube/connect` | POST | Connect to YouTube live |
-| `/admin/youtube/disconnect` | POST | Disconnect YouTube |
-| `/admin/youtube/status` | GET | Get YouTube poller status |
+| `/health` | GET | Service health, room counts, and persistence status |
+| `/state` | GET | Shared live state |
+| `/state/:roomId` | GET | Room-scoped live state |
+| `/events` | GET | Shared SSE stream |
+| `/events/:roomId` | GET | Room-specific SSE stream |
 
-Runtime snapshots now include the in-memory content bank, active pool order, topic-sequence settings, room registry, memberships, player state, and leaderboard history. On restart, the engine restores the current question position in a paused state; it does not automatically resume timers mid-round.
+### Players and answers
 
-## YouTube Integration
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/register` | POST | Register a player in the default flow |
+| `/register/me` | GET | Resolve a player and auto-rejoin their room |
+| `/register/rank` | GET | Player rank snapshot |
+| `/register/check` | GET | Username availability check |
+| `/answer` | POST | Submit answer on the shared route |
+| `/answer/:roomId` | POST | Submit answer for a room |
 
-### How It Works
+### Rooms and leaderboards
 
-1. Connect to a YouTube live stream via `/admin/youtube/connect`
-2. Engine polls YouTube Live Chat API every 5-10 seconds
-3. Parses messages for `!A`, `!B`, `!C`, `!D` (case-insensitive)
-4. Creates players with stable `userId = yt:<channelId>`
-5. Handles username collisions with `#XXXX` suffix
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/rooms` | GET | List rooms |
+| `/rooms/:roomId` | GET | Room summary |
+| `/rooms/:roomId/join` | POST | Join an active room |
+| `/rooms/:roomId/leave` | POST | Leave a room |
+| `/rooms/:roomId/state` | GET | Room-scoped state snapshot |
+| `/rooms/:roomId/events` | GET | Room-scoped SSE stream |
+| `/rooms/:roomId/register` | POST | Register directly into a room |
+| `/rooms/:roomId/answer` | POST | Submit room-scoped answer |
+| `/leaderboard?period=all-time\|daily\|weekly` | GET | Global leaderboard snapshot |
+| `/rooms/:roomId/leaderboard?period=all-time\|daily\|weekly` | GET | Room leaderboard snapshot |
 
-### Go Live Checklist
+### Content browsing
 
-```bash
-# 1. Set YouTube API key
-export YOUTUBE_API_KEY=AIza...
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/topics` | GET | List available topics |
+| `/topics/:topicId` | GET | Topic details |
 
-# 2. Connect to live stream
-curl -X POST http://localhost:4000/admin/youtube/connect \
-  -H "x-admin-token: $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"videoId": "YOUR_VIDEO_ID"}'
+## Admin API
 
-# 3. Start quiz
-curl -X POST http://localhost:4000/admin/start \
-  -H "x-admin-token: $ADMIN_TOKEN"
+All admin endpoints require the `x-admin-token` header.
 
-# 4. Check status
-curl http://localhost:4000/admin/youtube/status \
-  -H "x-admin-token: $ADMIN_TOKEN"
-```
+### Engine-wide controls
 
-## Quiz State
+- `POST /admin/start`
+- `POST /admin/resume`
+- `POST /admin/pause`
+- `POST /admin/next`
+- `POST /admin/reset`
+- `GET /admin/status`
+- `POST /admin/persistence/save`
+- `GET /admin/rooms`
+- `POST /admin/rooms`
 
-The engine broadcasts this state via SSE:
+### Room-scoped controls
 
-```typescript
-interface QuizState {
-  phase: "OPEN" | "LOCKED" | "REVEAL";
-  endsAtMs: number;
-  questionIndex: number;
-  totalQuestions: number;
-  themeTitle: string;
-  question: {
-    text: string;
-    choices: Array<{ id: string; label: string; text: string }>;
-    correctId?: string; // Only during REVEAL
-  };
-  leaderboard: {
-    topScorers: Array<{ rank: number; name: string; score: number }>;
-    topStreaks: Array<{ rank: number; name: string; streak: number }>;
-  };
-  teaching?: { title: string; body: string; refs: string[] };
-  ticker?: { items: string[] };
-  me?: PlayerInfo; // Only with ?userId= parameter
-}
-```
+- `POST /admin/rooms/:roomId/start`
+- `POST /admin/rooms/:roomId/resume`
+- `POST /admin/rooms/:roomId/pause`
+- `POST /admin/rooms/:roomId/next`
+- `POST /admin/rooms/:roomId/reset`
+- `GET /admin/rooms/:roomId/status`
+- `POST /admin/rooms/:roomId/close`
+
+### Topic and countdown controls
+
+Both engine-wide and room-scoped variants exist for:
+
+- topic start / next / skip / replay / countdown
+- topic sequence reads and updates
+- topic loop and series loop settings
+- countdown duration overrides
+- cancel-auto topic transitions
+
+### YouTube controls
+
+- `POST /admin/youtube/connect`
+- `POST /admin/youtube/disconnect`
+- `GET /admin/youtube/status`
+
+## Persistence Model
+
+Runtime snapshots include:
+
+- content bank and active question pool order
+- topic-sequence configuration
+- controller checkpoints
+- room registry and memberships
+- players, room scores, room streaks, and score event history
+
+On restart, the engine restores the current checkpoint in paused mode. It does not auto-resume timers mid-round.
+
+## Verification
+
+`npm test` runs the backend verification suite covering:
+
+- room-scoped leaderboard windows and weekly rollover behavior
+- room lifecycle and closed-room gameplay rejection
+- SSE partitioning between rooms
+- persistence restore behavior and paused checkpoint recovery
+
+`npx tsc --noEmit` is also expected to pass for the engine workspace.
+
+## YouTube Flow
+
+1. Set `YOUTUBE_API_KEY`.
+2. Connect a live stream with `POST /admin/youtube/connect`.
+3. Start or resume gameplay from the admin API.
+4. Poller messages containing `!A`, `!B`, `!C`, or `!D` are mapped to stable player IDs in the form `yt:<channelId>`.
 
 ## Project Structure
 
 ```
 src/
-├── index.ts              # Entry point
-├── app.ts                # Express app setup
-├── content/
-│   ├── questions.ts      # Legacy question bank
-│   └── bank.ts           # Dynamic question pool
-├── engine/
-│   ├── roundController.ts # Phase state machine
-│   └── scoring.ts        # Score calculation
-├── routes/
-│   ├── admin.ts          # Admin controls
-│   ├── adminYoutube.ts   # YouTube management
-│   ├── answer.ts         # Answer submission
-│   ├── events.ts         # SSE endpoint
-│   ├── health.ts         # Health check
-│   ├── register.ts       # User registration
-│   └── state.ts          # State endpoint
-├── sse/
-│   └── broker.ts         # SSE client management
-├── state/
-│   ├── players.ts        # Player data & scoring
-│   └── store.ts          # State store
-├── types/
-│   └── quiz.ts           # TypeScript types
-└── youtube/
-    ├── client.ts         # YouTube API client
-    ├── parser.ts         # Chat message parser
-    └── poller.ts         # Live chat poller
+├── app.ts                  # Express app wiring
+├── backend.verification.test.ts
+├── config/                 # Topic sequencing configuration
+├── content/                # Question bank and validation
+├── engine/                 # Round controller and scoring
+├── github/                 # GitHub-backed content helpers
+├── routes/                 # Public and admin HTTP routes
+├── sse/                    # SSE broker
+├── state/                  # Rooms, players, persistence, store
+├── testSupport/            # Test utilities
+├── types/                  # Shared runtime types
+└── youtube/                # YouTube client, parser, poller
 ```
 
 ## License
