@@ -7,6 +7,8 @@
 
 import { QuestionData } from "./questions";
 import { UIQuestion, normalizeToEngine } from "./validate";
+import { schedulePersistence } from "../state/persistence";
+import { DEFAULT_ROOM_ID } from "../state/rooms";
 
 /** Question entry with metadata */
 export interface BankEntry {
@@ -23,12 +25,21 @@ export interface TopicSummary {
   count: number;
 }
 
+export interface PersistedContentBankSnapshot {
+  entries: BankEntry[];
+  activePools?: Array<{ roomId: string; questionIds: string[] }>;
+  activePoolQuestionIds?: string[];
+}
+
 // In-memory storage
 const bank: Map<string, BankEntry> = new Map();
 const topicIndex: Map<string, Set<string>> = new Map();
 
-// Active question pool for current quiz set
-let activePool: BankEntry[] = [];
+const activePools: Map<string, BankEntry[]> = new Map();
+
+function getStoredPool(roomId: string = DEFAULT_ROOM_ID): BankEntry[] {
+  return activePools.get(roomId) || [];
+}
 
 function normalizeDifficultyLevel(
   difficulty?: UIQuestion["difficulty"]
@@ -86,6 +97,8 @@ export function ingestQuestions(questions: UIQuestion[]): {
 
     ids.push(q.id);
   }
+
+  schedulePersistence();
 
   return { added, updated, ids };
 }
@@ -151,32 +164,64 @@ export function setActivePool(topicIds: string[], shuffle: boolean = true): numb
     }
   }
 
-  activePool = [...questions];
+  const nextPool = [...questions];
 
   if (shuffle) {
     // Fisher-Yates shuffle
-    for (let i = activePool.length - 1; i > 0; i--) {
+    for (let i = nextPool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [activePool[i], activePool[j]] = [activePool[j], activePool[i]];
+      [nextPool[i], nextPool[j]] = [nextPool[j], nextPool[i]];
     }
   }
 
-  return activePool.length;
+  activePools.set(DEFAULT_ROOM_ID, nextPool);
+
+  schedulePersistence();
+
+  return nextPool.length;
+}
+
+export function setActivePoolForRoom(
+  topicIds: string[],
+  shuffle: boolean = true,
+  roomId: string = DEFAULT_ROOM_ID
+): number {
+  const questions: BankEntry[] = [];
+
+  if (topicIds.length === 0) {
+    questions.push(...bank.values());
+  } else {
+    for (const topicId of topicIds) {
+      questions.push(...getTopicQuestions(topicId));
+    }
+  }
+
+  const nextPool = [...questions];
+  if (shuffle) {
+    for (let index = nextPool.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [nextPool[index], nextPool[swapIndex]] = [nextPool[swapIndex], nextPool[index]];
+    }
+  }
+
+  activePools.set(roomId, nextPool);
+  schedulePersistence();
+  return nextPool.length;
 }
 
 /**
  * Get the size of the active pool
  */
-export function getActivePoolSize(): number {
-  return activePool.length;
+export function getActivePoolSize(roomId: string = DEFAULT_ROOM_ID): number {
+  return getStoredPool(roomId).length;
 }
 
 /**
  * Get topic IDs currently in the active pool
  */
-export function getActivePoolTopicIds(): string[] {
+export function getActivePoolTopicIds(roomId: string = DEFAULT_ROOM_ID): string[] {
   const topicIds = new Set<string>();
-  for (const entry of activePool) {
+  for (const entry of getStoredPool(roomId)) {
     topicIds.add(entry.topicId);
   }
   return Array.from(topicIds);
@@ -186,8 +231,8 @@ export function getActivePoolTopicIds(): string[] {
  * Get the current active topic ID (if pool contains only one topic)
  * Returns null if pool has multiple topics or is empty
  */
-export function getActiveTopicId(): string | null {
-  const topicIds = getActivePoolTopicIds();
+export function getActiveTopicId(roomId: string = DEFAULT_ROOM_ID): string | null {
+  const topicIds = getActivePoolTopicIds(roomId);
   if (topicIds.length === 1) {
     return topicIds[0];
   }
@@ -208,7 +253,8 @@ export function topicIdToTitle(topicId: string): string {
 /**
  * Get a question from the active pool by index
  */
-export function getPoolQuestion(index: number): QuestionData | null {
+export function getPoolQuestion(index: number, roomId: string = DEFAULT_ROOM_ID): QuestionData | null {
+  const activePool = getStoredPool(roomId);
   if (index < 0 || index >= activePool.length) {
     return null;
   }
@@ -218,7 +264,8 @@ export function getPoolQuestion(index: number): QuestionData | null {
 /**
  * Get active pool entry with metadata
  */
-export function getPoolEntry(index: number): BankEntry | null {
+export function getPoolEntry(index: number, roomId: string = DEFAULT_ROOM_ID): BankEntry | null {
+  const activePool = getStoredPool(roomId);
   if (index < 0 || index >= activePool.length) {
     return null;
   }
@@ -231,7 +278,8 @@ export function getPoolEntry(index: number): BankEntry | null {
 export function clearBank(): void {
   bank.clear();
   topicIndex.clear();
-  activePool = [];
+  activePools.clear();
+  schedulePersistence();
 }
 
 /**
@@ -258,6 +306,14 @@ export function removeQuestion(id: string): boolean {
     }
   }
 
+  activePools.forEach((pool, roomId) => {
+    activePools.set(
+      roomId,
+      pool.filter((poolEntry) => poolEntry.id !== id)
+    );
+  });
+  schedulePersistence();
+
   return true;
 }
 
@@ -271,6 +327,57 @@ export function isBankEmpty(): boolean {
 /**
  * Check if active pool has been set
  */
-export function isPoolEmpty(): boolean {
-  return activePool.length === 0;
+export function isPoolEmpty(roomId: string = DEFAULT_ROOM_ID): boolean {
+  return getStoredPool(roomId).length === 0;
+}
+
+export function getContentBankPersistenceSnapshot(): PersistedContentBankSnapshot {
+  return {
+    entries: [...bank.values()],
+    activePools: [...activePools.entries()].map(([roomId, pool]) => ({
+      roomId,
+      questionIds: pool.map((entry) => entry.id),
+    })),
+    activePoolQuestionIds: getStoredPool(DEFAULT_ROOM_ID).map((entry) => entry.id),
+  };
+}
+
+export function hydrateContentBankPersistenceSnapshot(
+  snapshot: PersistedContentBankSnapshot | null | undefined
+): void {
+  bank.clear();
+  topicIndex.clear();
+  activePools.clear();
+
+  if (!snapshot) {
+    return;
+  }
+
+  for (const entry of snapshot.entries || []) {
+    bank.set(entry.id, entry);
+    if (!topicIndex.has(entry.topicId)) {
+      topicIndex.set(entry.topicId, new Set());
+    }
+    topicIndex.get(entry.topicId)!.add(entry.id);
+  }
+
+  const persistedPools = snapshot.activePools;
+  if (persistedPools && persistedPools.length > 0) {
+    for (const persistedPool of persistedPools) {
+      activePools.set(
+        persistedPool.roomId,
+        (persistedPool.questionIds || [])
+          .map((id) => bank.get(id))
+          .filter((entry): entry is BankEntry => Boolean(entry))
+      );
+    }
+    return;
+  }
+
+  activePools.set(
+    DEFAULT_ROOM_ID,
+    (snapshot.activePoolQuestionIds || [])
+      .map((id) => bank.get(id))
+      .filter((entry): entry is BankEntry => Boolean(entry))
+  );
 }

@@ -13,7 +13,9 @@ import {
   getDistanceToTop10,
   isValidUsername,
   isUsernameTaken,
+  initializePlayerRoom,
 } from "../state/players";
+import { DEFAULT_ROOM_ID, getPlayerRooms, isGameplayRoomSupported, joinRoom, requireRoom } from "../state/rooms";
 
 const router = Router();
 
@@ -42,6 +44,33 @@ function checkRateLimit(ip: string): boolean {
 interface RegisterBody {
   username: string;
   userId?: string;
+  roomId?: string;
+}
+
+interface RenameBody {
+  userId: string;
+  newUsername: string;
+  roomId?: string;
+}
+
+function validateRoomForGameplay(res: Response, roomId: string): boolean {
+  try {
+    requireRoom(roomId);
+  } catch {
+    res.status(404).json({ ok: false, error: "Room not found" });
+    return false;
+  }
+
+  if (!isGameplayRoomSupported(roomId)) {
+    res.status(409).json({
+      ok: false,
+      error: "Room is closed",
+      roomId,
+    });
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -54,7 +83,11 @@ interface RegisterBody {
  * - 409 { ok: false, reason: "username_taken", message } if taken
  * - 429 if rate limited
  */
-router.post("/", (req: Request, res: Response) => {
+function handleRegister(req: Request, res: Response, roomId: string): void {
+  if (!validateRoomForGameplay(res, roomId)) {
+    return;
+  }
+
   // Rate limiting
   const ip = req.ip || req.socket.remoteAddress || "unknown";
   if (!checkRateLimit(ip)) {
@@ -87,7 +120,18 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
-  res.json(result);
+  initializePlayerRoom(result.userId!, roomId);
+  joinRoom(roomId, result.userId!);
+
+  res.json({
+    ...result,
+    roomId,
+  });
+}
+
+router.post("/", (req: Request, res: Response) => {
+  const roomId = (req.body as RegisterBody | undefined)?.roomId || DEFAULT_ROOM_ID;
+  handleRegister(req, res, roomId);
 });
 
 /**
@@ -95,7 +139,11 @@ router.post("/", (req: Request, res: Response) => {
  * 
  * Returns current player state or 404 if not registered
  */
-router.get("/me", (req: Request, res: Response) => {
+function handleMe(req: Request, res: Response, roomId: string): void {
+  if (!validateRoomForGameplay(res, roomId)) {
+    return;
+  }
+
   const userId = req.query.userId as string;
 
   if (!userId) {
@@ -117,14 +165,24 @@ router.get("/me", (req: Request, res: Response) => {
     return;
   }
 
+  initializePlayerRoom(userId, roomId);
+  joinRoom(roomId, userId);
+
   res.json({
     ok: true,
     userId: player.userId,
     username: player.username,
-    totalPoints: player.score,
-    streak: player.streak,
-    rank: getPlayerRank(userId),
+    totalPoints: getPlayerInfo(userId, roomId)?.totalPoints ?? 0,
+    streak: getPlayerInfo(userId, roomId)?.streak ?? 0,
+    rank: getPlayerRank(userId, roomId),
+    roomId,
+    rooms: getPlayerRooms(userId),
   });
+}
+
+router.get("/me", (req: Request, res: Response) => {
+  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
+  handleMe(req, res, roomId);
 });
 
 /**
@@ -132,7 +190,11 @@ router.get("/me", (req: Request, res: Response) => {
  * 
  * Returns player's rank and distance to top 10
  */
-router.get("/rank", (req: Request, res: Response) => {
+function handleRank(req: Request, res: Response, roomId: string): void {
+  if (!validateRoomForGameplay(res, roomId)) {
+    return;
+  }
+
   const userId = req.query.userId as string;
 
   if (!userId) {
@@ -144,7 +206,7 @@ router.get("/rank", (req: Request, res: Response) => {
     return;
   }
 
-  const info = getPlayerInfo(userId);
+  const info = getPlayerInfo(userId, roomId);
   if (!info) {
     res.status(404).json({
       ok: false,
@@ -160,7 +222,13 @@ router.get("/rank", (req: Request, res: Response) => {
     totalPoints: info.totalPoints,
     streak: info.streak,
     distanceToTop10: info.distanceToTop10,
+    roomId,
   });
+}
+
+router.get("/rank", (req: Request, res: Response) => {
+  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
+  handleRank(req, res, roomId);
 });
 
 /**
@@ -169,8 +237,12 @@ router.get("/rank", (req: Request, res: Response) => {
  * 
  * Allows changing username (same uniqueness rules)
  */
-router.post("/rename", (req: Request, res: Response) => {
-  const { userId, newUsername } = req.body as { userId: string; newUsername: string };
+function handleRename(req: Request, res: Response, roomId: string): void {
+  if (!validateRoomForGameplay(res, roomId)) {
+    return;
+  }
+
+  const { userId, newUsername } = req.body as RenameBody;
 
   if (!userId || !newUsername) {
     res.status(400).json({
@@ -199,7 +271,18 @@ router.post("/rename", (req: Request, res: Response) => {
     return;
   }
 
-  res.json(result);
+  initializePlayerRoom(userId, roomId);
+  joinRoom(roomId, userId);
+
+  res.json({
+    ...result,
+    roomId,
+  });
+}
+
+router.post("/rename", (req: Request, res: Response) => {
+  const roomId = (req.body as RenameBody | undefined)?.roomId || DEFAULT_ROOM_ID;
+  handleRename(req, res, roomId);
 });
 
 /**
@@ -207,7 +290,11 @@ router.post("/rename", (req: Request, res: Response) => {
  * 
  * Check if a username is available (without actually registering)
  */
-router.get("/check", (req: Request, res: Response) => {
+function handleCheck(req: Request, res: Response, roomId: string): void {
+  if (!validateRoomForGameplay(res, roomId)) {
+    return;
+  }
+
   const username = req.query.username as string;
 
   if (!username) {
@@ -240,6 +327,31 @@ router.get("/check", (req: Request, res: Response) => {
     username: normalized,
     ...(isTaken ? { reason: "username_taken" } : {}),
   });
+}
+
+router.get("/check", (req: Request, res: Response) => {
+  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
+  handleCheck(req, res, roomId);
+});
+
+router.post("/:roomId", (req: Request<{ roomId: string }>, res: Response) => {
+  handleRegister(req, res, req.params.roomId);
+});
+
+router.get("/:roomId/me", (req: Request<{ roomId: string }>, res: Response) => {
+  handleMe(req, res, req.params.roomId);
+});
+
+router.get("/:roomId/rank", (req: Request<{ roomId: string }>, res: Response) => {
+  handleRank(req, res, req.params.roomId);
+});
+
+router.post("/:roomId/rename", (req: Request<{ roomId: string }>, res: Response) => {
+  handleRename(req, res, req.params.roomId);
+});
+
+router.get("/:roomId/check", (req: Request<{ roomId: string }>, res: Response) => {
+  handleCheck(req, res, req.params.roomId);
 });
 
 export default router;

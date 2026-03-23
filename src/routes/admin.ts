@@ -27,6 +27,9 @@ import {
   setSeriesLoopMode,
   setCountdownSeconds,
 } from "../config/topicSequence";
+import { flushPersistence, getPersistenceStatus } from "../state/persistence";
+import { DEFAULT_ROOM_ID, closeRoom, createRoom, listRooms, requireRoom } from "../state/rooms";
+import { getClientCountForRoom } from "../sse/broker";
 import type { LoopMode } from "../types/quiz";
 
 const router = Router();
@@ -52,6 +55,125 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
 // Apply admin auth to all routes
 router.use(requireAdmin);
 
+function getAdminRoomId(req: Request): string {
+  return typeof req.params.roomId === "string" && req.params.roomId.length > 0
+    ? req.params.roomId
+    : DEFAULT_ROOM_ID;
+}
+
+function resolveAdminRoom(req: Request, res: Response): string | null {
+  const roomId = getAdminRoomId(req);
+
+  try {
+    requireRoom(roomId);
+    return roomId;
+  } catch {
+    res.status(404).json({ error: "Room not found", roomId });
+    return null;
+  }
+}
+
+function getStatusPayload(roomId: string) {
+  return {
+    ...getStatus(roomId),
+    playerCount: getPlayerCount(roomId),
+    roomId,
+  };
+}
+
+function validateTopicSequenceUpdate(update: { topicSequence?: string[] }, res: Response): boolean {
+  if (!update.topicSequence) {
+    return true;
+  }
+
+  const availableTopics = getAllTopicIds();
+  const invalidTopics = update.topicSequence.filter((id: string) => !availableTopics.includes(id));
+  if (invalidTopics.length > 0) {
+    res.status(400).json({
+      error: "Some topics not found",
+      invalidTopics,
+      availableTopics,
+    });
+    return false;
+  }
+
+  return true;
+}
+
+function parseLoopMode(mode: unknown, res: Response): LoopMode | null {
+  if (mode === undefined) {
+    res.status(400).json({
+      error: "Missing required field: mode",
+      validModes: ["off", "once", "infinite", "<number>"],
+    });
+    return null;
+  }
+
+  if (mode === "off" || mode === "once" || mode === "infinite") {
+    return mode;
+  }
+
+  if (typeof mode === "number" && mode >= 0) {
+    return mode;
+  }
+
+  if (typeof mode === "string" && !isNaN(parseInt(mode, 10))) {
+    return parseInt(mode, 10);
+  }
+
+  res.status(400).json({
+    error: `Invalid mode: ${String(mode)}`,
+    validModes: ["off", "once", "infinite", "<number>"],
+  });
+  return null;
+}
+
+function startControllerForRoom(roomId: string, res: Response): void {
+  if (isRunning(roomId)) {
+    res.status(409).json({ error: "Controller already running", roomId });
+    return;
+  }
+
+  start(roomId);
+  res.json({
+    success: true,
+    message: "Controller started",
+    status: getStatusPayload(roomId),
+  });
+}
+
+function pauseControllerForRoom(roomId: string, res: Response): void {
+  if (!isRunning(roomId)) {
+    res.status(409).json({ error: "Controller not running", roomId });
+    return;
+  }
+
+  pause(roomId);
+  res.json({
+    success: true,
+    message: "Controller paused",
+    status: getStatusPayload(roomId),
+  });
+}
+
+function skipToNextForRoom(roomId: string, res: Response): void {
+  skipToNext(roomId);
+  res.json({
+    success: true,
+    message: "Skipped to next question",
+    status: getStatusPayload(roomId),
+  });
+}
+
+function resetRoom(roomId: string, res: Response): void {
+  reset(roomId);
+  res.json({
+    success: true,
+    message: "Quiz reset",
+    status: getStatusPayload(roomId),
+  });
+}
+
 /**
  * GET /admin/status - Get controller status
  */
@@ -60,65 +182,55 @@ router.get("/status", (_req: Request, res: Response) => {
   res.json({
     ...status,
     playerCount: getPlayerCount(),
+    persistence: getPersistenceStatus(),
   });
+});
+
+router.post("/persistence/save", async (_req: Request, res: Response) => {
+  try {
+    const saved = await flushPersistence();
+    return res.json({
+      success: saved,
+      persistence: getPersistenceStatus(),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to save runtime state",
+      persistence: getPersistenceStatus(),
+    });
+  }
 });
 
 /**
  * POST /admin/start - Start the controller loop
  */
 router.post("/start", (_req: Request, res: Response) => {
-  if (isRunning()) {
-    res.status(409).json({ error: "Controller already running" });
-    return;
-  }
+  startControllerForRoom(DEFAULT_ROOM_ID, res);
+});
 
-  start();
-  res.json({
-    success: true,
-    message: "Controller started",
-    status: getStatus(),
-  });
+router.post("/resume", (_req: Request, res: Response) => {
+  startControllerForRoom(DEFAULT_ROOM_ID, res);
 });
 
 /**
  * POST /admin/pause - Pause the controller
  */
 router.post("/pause", (_req: Request, res: Response) => {
-  if (!isRunning()) {
-    res.status(409).json({ error: "Controller not running" });
-    return;
-  }
-
-  pause();
-  res.json({
-    success: true,
-    message: "Controller paused",
-    status: getStatus(),
-  });
+  pauseControllerForRoom(DEFAULT_ROOM_ID, res);
 });
 
 /**
  * POST /admin/next - Skip to next question
  */
 router.post("/next", (_req: Request, res: Response) => {
-  skipToNext();
-  res.json({
-    success: true,
-    message: "Skipped to next question",
-    status: getStatus(),
-  });
+  skipToNextForRoom(DEFAULT_ROOM_ID, res);
 });
 
 /**
  * POST /admin/reset - Reset all scores and restart
  */
 router.post("/reset", (_req: Request, res: Response) => {
-  reset();
-  res.json({
-    success: true,
-    message: "Quiz reset",
-    status: getStatus(),
-  });
+  resetRoom(DEFAULT_ROOM_ID, res);
 });
 
 // ============== Topic Management Routes ==============
@@ -337,21 +449,9 @@ router.get("/topic/sequence", (_req: Request, res: Response) => {
  */
 router.post("/topic/sequence", (req: Request, res: Response) => {
   const update = req.body || {};
-  
-  // Validate topicSequence if provided
-  if (update.topicSequence) {
-    const availableTopics = getAllTopicIds();
-    const invalidTopics = update.topicSequence.filter(
-      (id: string) => !availableTopics.includes(id)
-    );
-    
-    if (invalidTopics.length > 0) {
-      return res.status(400).json({
-        error: "Some topics not found",
-        invalidTopics,
-        availableTopics,
-      });
-    }
+
+  if (!validateTopicSequenceUpdate(update, res)) {
+    return;
   }
   
   const newConfig = setTopicSequenceConfig(update);
@@ -376,28 +476,9 @@ router.post("/topic/sequence", (req: Request, res: Response) => {
  */
 router.post("/topic/loop", (req: Request, res: Response) => {
   const { mode } = req.body || {};
-  
-  // Validate mode
-  if (mode === undefined) {
-    return res.status(400).json({
-      error: "Missing required field: mode",
-      validModes: ["off", "once", "infinite", "<number>"],
-    });
-  }
-  
-  // Parse mode
-  let loopMode: LoopMode;
-  if (mode === "off" || mode === "once" || mode === "infinite") {
-    loopMode = mode;
-  } else if (typeof mode === "number" && mode >= 0) {
-    loopMode = mode;
-  } else if (typeof mode === "string" && !isNaN(parseInt(mode))) {
-    loopMode = parseInt(mode);
-  } else {
-    return res.status(400).json({
-      error: `Invalid mode: ${mode}`,
-      validModes: ["off", "once", "infinite", "<number>"],
-    });
+  const loopMode = parseLoopMode(mode, res);
+  if (loopMode === null) {
+    return;
   }
   
   const config = setTopicLoopMode(loopMode);
@@ -418,26 +499,9 @@ router.post("/topic/loop", (req: Request, res: Response) => {
  */
 router.post("/series/loop", (req: Request, res: Response) => {
   const { mode } = req.body || {};
-  
-  if (mode === undefined) {
-    return res.status(400).json({
-      error: "Missing required field: mode",
-      validModes: ["off", "once", "infinite", "<number>"],
-    });
-  }
-  
-  let loopMode: LoopMode;
-  if (mode === "off" || mode === "once" || mode === "infinite") {
-    loopMode = mode;
-  } else if (typeof mode === "number" && mode >= 0) {
-    loopMode = mode;
-  } else if (typeof mode === "string" && !isNaN(parseInt(mode))) {
-    loopMode = parseInt(mode);
-  } else {
-    return res.status(400).json({
-      error: `Invalid mode: ${mode}`,
-      validModes: ["off", "once", "infinite", "<number>"],
-    });
+  const loopMode = parseLoopMode(mode, res);
+  if (loopMode === null) {
+    return;
   }
   
   const config = setSeriesLoopMode(loopMode);
@@ -477,6 +541,375 @@ router.post("/countdown/set", (req: Request, res: Response) => {
     success: true,
     message: `Countdown duration set to ${seconds}s`,
     countdownSeconds: config.countdownSeconds,
+  });
+});
+
+// ============== Room Management Routes ==============
+
+router.get("/rooms", (_req: Request, res: Response) => {
+  return res.json({
+    rooms: listRooms(true).map((room) => ({
+      ...room,
+      connectedClients: getClientCountForRoom(room.roomId),
+      gameplayPlayerCount: getPlayerCount(room.roomId),
+    })),
+  });
+});
+
+router.post("/rooms", (req: Request, res: Response) => {
+  const name = typeof req.body?.name === "string" ? req.body.name : "";
+  const roomId = typeof req.body?.roomId === "string" ? req.body.roomId : undefined;
+
+  try {
+    const room = createRoom(name, roomId);
+    return res.status(201).json({
+      success: true,
+      room,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      error: error instanceof Error ? error.message : "Failed to create room",
+    });
+  }
+});
+
+router.post("/rooms/:roomId/close", (req: Request<{ roomId: string }>, res: Response) => {
+  try {
+    const room = closeRoom(req.params.roomId);
+    return res.json({
+      success: true,
+      room,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to close room";
+    const status = message === "Room not found" ? 404 : 400;
+    return res.status(status).json({ error: message });
+  }
+});
+
+router.get("/rooms/:roomId/status", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  return res.json(getStatusPayload(roomId));
+});
+
+router.post("/rooms/:roomId/start", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  startControllerForRoom(roomId, res);
+});
+
+router.post("/rooms/:roomId/resume", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  startControllerForRoom(roomId, res);
+});
+
+router.post("/rooms/:roomId/pause", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  pauseControllerForRoom(roomId, res);
+});
+
+router.post("/rooms/:roomId/next", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  skipToNextForRoom(roomId, res);
+});
+
+router.post("/rooms/:roomId/reset", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  resetRoom(roomId, res);
+});
+
+router.post("/rooms/:roomId/topic/next", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const topicIdRaw = req.body?.topicId;
+  const topicId = typeof topicIdRaw === "string" ? topicIdRaw : undefined;
+
+  if (topicId) {
+    const availableTopics = getAllTopicIds();
+    if (!availableTopics.includes(topicId)) {
+      return res.status(400).json({
+        error: `Topic not found: ${topicId}`,
+        availableTopics,
+      });
+    }
+
+    startNextTopic(topicId, roomId);
+    return res.json({
+      success: true,
+      message: `Started topic: ${topicId}`,
+      topicTitle: topicIdToTitle(topicId),
+      status: getStatusPayload(roomId),
+    });
+  }
+
+  const pendingTopicId = getPendingNextTopic(roomId);
+  if (!pendingTopicId) {
+    return res.status(400).json({
+      error: "No pending next topic. Set topicId in body or use /admin/rooms/:roomId/topic/start/:topicId",
+    });
+  }
+
+  startNextTopic(pendingTopicId, roomId);
+  return res.json({
+    success: true,
+    message: `Started next topic: ${pendingTopicId}`,
+    topicTitle: topicIdToTitle(pendingTopicId),
+    status: getStatusPayload(roomId),
+  });
+});
+
+router.get("/rooms/:roomId/topic/sequence", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const config = getTopicSequenceConfig(roomId);
+  const availableTopics = getAllTopicIds();
+  return res.json({
+    config,
+    availableTopics,
+    availableTopicsWithTitles: availableTopics.map((id) => ({
+      id,
+      title: topicIdToTitle(id),
+    })),
+  });
+});
+
+router.post("/rooms/:roomId/topic/sequence", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const update = req.body || {};
+  if (!validateTopicSequenceUpdate(update, res)) {
+    return;
+  }
+
+  const config = setTopicSequenceConfig(update, roomId);
+  return res.json({ success: true, config, roomId });
+});
+
+router.post("/rooms/:roomId/topic/loop", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const loopMode = parseLoopMode(req.body?.mode, res);
+  if (loopMode === null) {
+    return;
+  }
+
+  const config = setTopicLoopMode(loopMode, roomId);
+  return res.json({
+    success: true,
+    message: `Topic loop mode set to: ${loopMode}`,
+    roomId,
+    topicLoopMode: config.topicLoopMode,
+    topicRepeatsRemaining: config.topicRepeatsRemaining,
+  });
+});
+
+router.post("/rooms/:roomId/series/loop", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const loopMode = parseLoopMode(req.body?.mode, res);
+  if (loopMode === null) {
+    return;
+  }
+
+  const config = setSeriesLoopMode(loopMode, roomId);
+  return res.json({
+    success: true,
+    message: `Series loop mode set to: ${loopMode}`,
+    roomId,
+    seriesLoopMode: config.seriesLoopMode,
+    seriesRepeatsRemaining: config.seriesRepeatsRemaining,
+  });
+});
+
+router.post("/rooms/:roomId/countdown/set", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const secondsRaw = req.body?.seconds;
+  if (secondsRaw === undefined) {
+    return res.status(400).json({ error: "Missing required field: seconds" });
+  }
+
+  const seconds = typeof secondsRaw === "number" ? secondsRaw : parseInt(secondsRaw, 10);
+  if (isNaN(seconds) || seconds < 1 || seconds > 60) {
+    return res.status(400).json({ error: "seconds must be between 1 and 60" });
+  }
+
+  const config = setCountdownSeconds(seconds, roomId);
+  return res.json({
+    success: true,
+    message: `Countdown duration set to ${seconds}s`,
+    roomId,
+    countdownSeconds: config.countdownSeconds,
+  });
+});
+
+router.post("/rooms/:roomId/topic/cancel-auto", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  if (!isInTopicSummary(roomId)) {
+    return res.status(400).json({
+      error: "Not in topic summary mode",
+    });
+  }
+
+  cancelAutoAdvance(roomId);
+  return res.json({
+    success: true,
+    message: "Auto-advance cancelled",
+    status: getStatusPayload(roomId),
+  });
+});
+
+router.post("/rooms/:roomId/topic/start/:topicId", (req: Request<{ roomId: string; topicId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const { topicId } = req.params;
+  const availableTopics = getAllTopicIds();
+  if (!availableTopics.includes(topicId)) {
+    return res.status(400).json({
+      error: `Topic not found: ${topicId}`,
+      availableTopics,
+    });
+  }
+
+  startNextTopic(topicId, roomId);
+  return res.json({
+    success: true,
+    message: `Started topic: ${topicId}`,
+    topicTitle: topicIdToTitle(topicId),
+    status: getStatusPayload(roomId),
+  });
+});
+
+router.post("/rooms/:roomId/topic/skip", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const result = skipCurrentTopic(roomId);
+  if (!result.success || !result.nextTopicId) {
+    return res.status(400).json({
+      error: "Cannot skip - no next topic available",
+      availableTopics: getAllTopicIds(),
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: `Skipped to topic: ${result.nextTopicId}`,
+    topicId: result.nextTopicId,
+    topicTitle: topicIdToTitle(result.nextTopicId),
+    status: getStatusPayload(roomId),
+  });
+});
+
+router.post("/rooms/:roomId/topic/replay", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const result = replayTopic(roomId);
+  if (!result.success || !result.topicId) {
+    return res.status(400).json({
+      error: "Cannot replay - no active topic",
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: `Replaying topic: ${result.topicId}`,
+    topicId: result.topicId,
+    topicTitle: topicIdToTitle(result.topicId),
+    status: getStatusPayload(roomId),
+  });
+});
+
+router.post("/rooms/:roomId/topic/countdown", (req: Request<{ roomId: string }>, res: Response) => {
+  const roomId = resolveAdminRoom(req, res);
+  if (!roomId) {
+    return;
+  }
+
+  const countdownSecondsRaw = req.body?.countdownSeconds;
+  const countdownSeconds = typeof countdownSecondsRaw === "number"
+    ? Math.max(1, Math.min(60, countdownSecondsRaw))
+    : 10;
+
+  const topicIdRaw = req.body?.topicId;
+  let topicId = typeof topicIdRaw === "string" ? topicIdRaw : getPendingNextTopic(roomId) || undefined;
+  if (!topicId) {
+    topicId = getAllTopicIds()[0];
+  }
+
+  if (!topicId) {
+    return res.status(400).json({ error: "No topic available for countdown" });
+  }
+
+  const availableTopics = getAllTopicIds();
+  if (!availableTopics.includes(topicId)) {
+    return res.status(400).json({
+      error: `Topic not found: ${topicId}`,
+      availableTopics,
+    });
+  }
+
+  emitTopicCountdown(topicId, countdownSeconds, roomId);
+  return res.json({
+    success: true,
+    message: `Starting ${countdownSeconds}s countdown for topic: ${topicId}`,
+    topicId,
+    topicTitle: topicIdToTitle(topicId),
+    countdownSeconds,
+    status: getStatusPayload(roomId),
   });
 });
 

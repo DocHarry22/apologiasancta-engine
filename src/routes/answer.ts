@@ -4,7 +4,8 @@
 
 import { Router, Request, Response } from "express";
 import { getCurrentPhase, getQuestionIndex } from "../engine/roundController";
-import { submitAnswer, submitAnswerForRegistered, isRegistered, getOrCreatePlayer } from "../state/players";
+import { submitAnswer, submitAnswerForRegistered, isRegistered, initializePlayerRoom } from "../state/players";
+import { DEFAULT_ROOM_ID, isGameplayRoomSupported, isPlayerInRoom, joinRoom, requireRoom } from "../state/rooms";
 
 const router = Router();
 
@@ -13,9 +14,26 @@ interface AnswerBody {
   name?: string;     // Optional: only needed for YouTube auto-registration
   username?: string; // Preferred: for registered mobile users
   choiceId: string;
+  roomId?: string;
 }
 
-router.post("/", (req: Request, res: Response) => {
+function handleAnswer(req: Request, res: Response, roomId: string): void {
+  try {
+    requireRoom(roomId);
+  } catch {
+    res.status(404).json({ ok: false, error: "Room not found" });
+    return;
+  }
+
+  if (!isGameplayRoomSupported(roomId)) {
+    res.status(409).json({
+      ok: false,
+      error: "Room is closed",
+      roomId,
+    });
+    return;
+  }
+
   const { userId, name, username, choiceId } = req.body as AnswerBody;
 
   // Validate required fields
@@ -38,7 +56,7 @@ router.post("/", (req: Request, res: Response) => {
   }
 
   // Check if we're in OPEN phase
-  const phase = getCurrentPhase();
+  const phase = getCurrentPhase(roomId);
   if (phase !== "OPEN") {
     res.status(409).json({
       ok: false,
@@ -48,7 +66,7 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
-  const questionIndex = getQuestionIndex();
+  const questionIndex = getQuestionIndex(roomId);
   const normalizedChoiceId = choiceId.toLowerCase();
 
   // Handle YouTube vs Mobile answers differently
@@ -57,7 +75,9 @@ router.post("/", (req: Request, res: Response) => {
   if (isYouTubeUser) {
     // YouTube users: auto-register with collision handling
     const displayName = name || username || "YouTuber";
-    const accepted = submitAnswer(questionIndex, userId, displayName, normalizedChoiceId);
+    initializePlayerRoom(userId, roomId);
+    joinRoom(roomId, userId);
+    const accepted = submitAnswer(questionIndex, userId, displayName, normalizedChoiceId, roomId);
     
     if (!accepted) {
       res.json({
@@ -85,7 +105,12 @@ router.post("/", (req: Request, res: Response) => {
     return;
   }
 
-  const result = submitAnswerForRegistered(questionIndex, userId, normalizedChoiceId);
+  initializePlayerRoom(userId, roomId);
+  if (!isPlayerInRoom(roomId, userId)) {
+    joinRoom(roomId, userId);
+  }
+
+  const result = submitAnswerForRegistered(questionIndex, userId, normalizedChoiceId, roomId);
 
   if (!result.accepted) {
     res.json({
@@ -100,6 +125,15 @@ router.post("/", (req: Request, res: Response) => {
     ok: true,
     accepted: true,
   });
+}
+
+router.post("/", (req: Request, res: Response) => {
+  const roomId = (req.body as AnswerBody | undefined)?.roomId || DEFAULT_ROOM_ID;
+  handleAnswer(req, res, roomId);
+});
+
+router.post("/:roomId", (req: Request<{ roomId: string }>, res: Response) => {
+  handleAnswer(req, res, req.params.roomId);
 });
 
 export default router;

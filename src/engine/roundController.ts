@@ -17,11 +17,10 @@ import {
   getPoolQuestion, 
   getPoolEntry, 
   getActivePoolSize, 
-  isPoolEmpty,
   getActiveTopicId,
   topicIdToTitle,
   getAllTopicIds,
-  setActivePool,
+  setActivePoolForRoom,
 } from "../content/bank";
 import { getScoringMode } from "./scoring";
 import {
@@ -29,7 +28,6 @@ import {
   getTopScorers,
   getTopStreaks,
   clearAnswersForQuestion,
-  resetAllPlayers,
   getTopScorersWithStreaks,
   getTopStreaksWithScores,
   getTopicStats,
@@ -37,7 +35,8 @@ import {
   clearPlayerStats,
   clearAllAnswers,
 } from "../state/players";
-import { broadcast, broadcastEvent, getClientCount } from "../sse/broker";
+import { broadcast, broadcastEvent, getClientCount, getClientCountForRoom } from "../sse/broker";
+import { DEFAULT_ROOM_ID, listRooms } from "../state/rooms";
 import {
   getTopicSequenceConfig,
   getNextTopicId,
@@ -49,6 +48,7 @@ import {
   setSeriesLoopMode,
   setCountdownSeconds,
 } from "../config/topicSequence";
+import { schedulePersistence } from "../state/persistence";
 
 /** Phase durations from environment (in seconds) */
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
@@ -58,8 +58,8 @@ const REVEAL_SECONDS = parseInt(process.env.REVEAL_SECONDS || "8", 10);
 /**
  * Get question by index - uses active pool if available, falls back to legacy bank
  */
-function getQuestion(index: number) {
-  const poolQuestion = getPoolQuestion(index);
+function getQuestion(index: number, roomId: string = DEFAULT_ROOM_ID) {
+  const poolQuestion = getPoolQuestion(index, roomId);
   if (poolQuestion) {
     return poolQuestion;
   }
@@ -69,8 +69,8 @@ function getQuestion(index: number) {
 /**
  * Get total number of questions - uses active pool if available
  */
-function getTotalQuestions(): number {
-  const poolSize = getActivePoolSize();
+function getTotalQuestions(roomId: string = DEFAULT_ROOM_ID): number {
+  const poolSize = getActivePoolSize(roomId);
   if (poolSize > 0) {
     return poolSize;
   }
@@ -103,44 +103,78 @@ interface ControllerState {
   pendingNextTopicId: string | null;
 }
 
-/** Current controller state */
-const state: ControllerState = {
-  running: false,
-  questionIndex: 0,
-  phase: "OPEN",
-  endsAtMs: 0,
-  openStartMs: 0,
-  timer: null,
-  congratsTimer: null,
-  countdownTimer: null,
-  topicTransitionTimer: null,
-  inCongrats: false,
-  inCountdown: false,
-  inTopicSummary: false,
-  summaryTopicId: null,
-  pendingNextTopicId: null,
-};
+export interface PersistedControllerSnapshot {
+  rooms: Array<{
+    roomId: string;
+    running: boolean;
+    questionIndex: number;
+    phase: QuizPhase;
+    endsAtMs: number;
+    openStartMs: number;
+    inCongrats: boolean;
+    inCountdown: boolean;
+    inTopicSummary: boolean;
+    summaryTopicId: string | null;
+    pendingNextTopicId: string | null;
+  }>;
+}
 
-function getCurrentDifficulty(): number {
-  const poolEntry = getPoolEntry(state.questionIndex);
+function createControllerState(): ControllerState {
+  return {
+    running: false,
+    questionIndex: 0,
+    phase: "OPEN",
+    endsAtMs: 0,
+    openStartMs: 0,
+    timer: null,
+    congratsTimer: null,
+    countdownTimer: null,
+    topicTransitionTimer: null,
+    inCongrats: false,
+    inCountdown: false,
+    inTopicSummary: false,
+    summaryTopicId: null,
+    pendingNextTopicId: null,
+  };
+}
+
+const controllerStates: Map<string, ControllerState> = new Map();
+
+function getControllerState(roomId: string = DEFAULT_ROOM_ID): ControllerState {
+  let state = controllerStates.get(roomId);
+  if (!state) {
+    state = createControllerState();
+    controllerStates.set(roomId, state);
+  }
+  return state;
+}
+
+function getCurrentDifficulty(roomId: string = DEFAULT_ROOM_ID): number {
+  const state = getControllerState(roomId);
+  const poolEntry = getPoolEntry(state.questionIndex, roomId);
   if (poolEntry) {
     return poolEntry.difficulty;
   }
   return 3;
 }
 
+function getGameplayRoomIds(): string[] {
+  return listRooms(false).map((room) => room.roomId);
+}
+
 /**
  * Build QuizState from current controller state
  */
-function buildQuizState(): QuizState {
-  const questionData = getQuestion(state.questionIndex);
+function buildQuizState(roomId: string = DEFAULT_ROOM_ID): QuizState {
+  const state = getControllerState(roomId);
+  const questionData = getQuestion(state.questionIndex, roomId);
   const isReveal = state.phase === "REVEAL";
 
   return {
     phase: state.phase,
     endsAtMs: state.endsAtMs,
     questionIndex: state.questionIndex,
-    totalQuestions: getTotalQuestions(),
+    totalQuestions: getTotalQuestions(roomId),
     themeTitle: questionData.themeTitle,
     question: {
       text: questionData.text,
@@ -149,12 +183,12 @@ function buildQuizState(): QuizState {
       ...(isReveal ? { correctId: questionData.correctId } : {}),
     },
     leaderboard: {
-      topScorers: getTopScorers(10),
-      topStreaks: getTopStreaks(5),
+      topScorers: getTopScorers(10, roomId),
+      topStreaks: getTopStreaks(5, roomId),
     },
     teaching: isReveal ? questionData.teaching : undefined,
     ticker: {
-      items: generateTickerItems(),
+      items: generateTickerItems(roomId),
     },
   };
 }
@@ -162,9 +196,10 @@ function buildQuizState(): QuizState {
 /**
  * Generate ticker items based on current state
  */
-function generateTickerItems(): string[] {
-  const scorers = getTopScorers(1);
-  const streakers = getTopStreaks(1);
+function generateTickerItems(roomId: string = DEFAULT_ROOM_ID): string[] {
+  const state = getControllerState(roomId);
+  const scorers = getTopScorers(1, roomId);
+  const streakers = getTopStreaks(1, roomId);
 
   const items: string[] = [];
 
@@ -176,7 +211,7 @@ function generateTickerItems(): string[] {
     items.push(`Top Streak: ${streakers[0]!.name} 🔥${streakers[0]!.streak}`);
   }
 
-  items.push(`Q${state.questionIndex + 1}/${getTotalQuestions()}`);
+  items.push(`Q${state.questionIndex + 1}/${getTotalQuestions(roomId)}`);
 
   return items;
 }
@@ -184,15 +219,20 @@ function generateTickerItems(): string[] {
 /**
  * Broadcast current state to all clients
  */
-function broadcastState(): void {
-  const quizState = buildQuizState();
+function broadcastState(roomId: string = DEFAULT_ROOM_ID): void {
+  const quizState = buildQuizState(roomId);
   broadcast(quizState);
+}
+
+function markControllerChanged(): void {
+  schedulePersistence();
 }
 
 /**
  * Clear the current timer
  */
-function clearTimer(): void {
+function clearTimer(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (state.timer) {
     clearTimeout(state.timer);
     state.timer = null;
@@ -202,77 +242,90 @@ function clearTimer(): void {
 /**
  * Schedule the next phase transition
  */
-function scheduleNextPhase(delayMs: number, callback: () => void): void {
-  clearTimer();
+function scheduleNextPhase(roomId: string, delayMs: number, callback: () => void): void {
+  const state = getControllerState(roomId);
+  clearTimer(roomId);
   state.timer = setTimeout(callback, delayMs);
 }
 
 /**
  * Transition to OPEN phase
  */
-function enterOpenPhase(): void {
+function enterOpenPhase(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   state.phase = "OPEN";
   state.openStartMs = Date.now();
   state.endsAtMs = state.openStartMs + OPEN_SECONDS * 1000;
+  markControllerChanged();
 
   console.log(
     `[Controller] OPEN phase - Q${state.questionIndex + 1} (${OPEN_SECONDS}s)`
   );
-  broadcastState();
+  broadcastState(roomId);
 
-  scheduleNextPhase(OPEN_SECONDS * 1000, enterLockedPhase);
+  scheduleNextPhase(roomId, OPEN_SECONDS * 1000, () => enterLockedPhase(roomId));
 }
 
 /**
  * Transition to LOCKED phase
  */
-function enterLockedPhase(): void {
+function enterLockedPhase(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   state.phase = "LOCKED";
   state.endsAtMs = Date.now() + LOCK_SECONDS * 1000;
+  markControllerChanged();
 
   console.log(`[Controller] LOCKED phase (${LOCK_SECONDS}s)`);
-  broadcastState();
+  broadcastState(roomId);
 
-  scheduleNextPhase(LOCK_SECONDS * 1000, enterRevealPhase);
+  scheduleNextPhase(roomId, LOCK_SECONDS * 1000, () => enterRevealPhase(roomId));
 }
 
 /**
  * Transition to REVEAL phase
  */
-function enterRevealPhase(): void {
+function enterRevealPhase(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   // Evaluate answers before revealing
-  const questionData = getQuestion(state.questionIndex);
-  evaluateAnswers(state.questionIndex, questionData.correctId, {
-    openStartMs: state.openStartMs,
-    openDurationMs: OPEN_SECONDS * 1000,
-    difficulty: getCurrentDifficulty(),
-  });
+  const questionData = getQuestion(state.questionIndex, roomId);
+  evaluateAnswers(
+    state.questionIndex,
+    questionData.correctId,
+    {
+      openStartMs: state.openStartMs,
+      openDurationMs: OPEN_SECONDS * 1000,
+      difficulty: getCurrentDifficulty(roomId),
+    },
+    roomId
+  );
 
   state.phase = "REVEAL";
   state.endsAtMs = Date.now() + REVEAL_SECONDS * 1000;
+  markControllerChanged();
 
   console.log(
     `[Controller] REVEAL phase (${REVEAL_SECONDS}s) - Correct: ${questionData.correctId}`
   );
-  broadcastState();
+  broadcastState(roomId);
 
-  scheduleNextPhase(REVEAL_SECONDS * 1000, advanceToNextQuestion);
+  scheduleNextPhase(roomId, REVEAL_SECONDS * 1000, () => advanceToNextQuestion(roomId));
 }
 
 /**
  * Check if current question is the last in the topic/pool
  */
-function isLastQuestion(): boolean {
-  return state.questionIndex === getTotalQuestions() - 1;
+function isLastQuestion(roomId: string = DEFAULT_ROOM_ID): boolean {
+  const state = getControllerState(roomId);
+  return state.questionIndex === getTotalQuestions(roomId) - 1;
 }
 
 /**
  * Build topic summary data for emission
  */
-function buildTopicSummary(): TopicSummary {
-  const leaders = getTopScorersWithStreaks(10);
-  const topStreaks = getTopStreaksWithScores(5);
-  const stats = getTopicStats();
+function buildTopicSummary(roomId?: string): TopicSummary {
+  const leaders = getTopScorersWithStreaks(10, roomId);
+  const topStreaks = getTopStreaksWithScores(5, roomId);
+  const stats = getTopicStats(roomId);
 
   return {
     leaders: leaders.map((l) => ({
@@ -291,7 +344,7 @@ function buildTopicSummary(): TopicSummary {
       averageCorrectPct: stats.averageCorrectPct,
       totalParticipants: stats.totalParticipants,
       maxScore: stats.maxScore,
-      questionCount: getTotalQuestions(),
+      questionCount: getTotalQuestions(roomId),
     },
   };
 }
@@ -299,22 +352,22 @@ function buildTopicSummary(): TopicSummary {
 /**
  * Determine the next topic based on repeat/loop settings
  */
-function determineNextTopic(currentTopicId: string): string | null {
+function determineNextTopic(currentTopicId: string, roomId: string = DEFAULT_ROOM_ID): string | null {
   const availableTopics = getAllTopicIds();
   
   // Check if we should repeat the current topic
-  if (shouldRepeatTopic()) {
+  if (shouldRepeatTopic(roomId)) {
     console.log(`[Controller] Topic loop mode active - repeating ${currentTopicId}`);
     return currentTopicId;
   }
   
   // Check for next topic in sequence
-  const nextTopicId = getNextTopicId(currentTopicId, availableTopics);
+  const nextTopicId = getNextTopicId(currentTopicId, availableTopics, roomId);
   
   // If series complete, check if we should loop
-  if (!nextTopicId && shouldRepeatSeries()) {
+  if (!nextTopicId && shouldRepeatSeries(roomId)) {
     console.log(`[Controller] Series loop mode active - restarting from first topic`);
-    return getFirstTopicId(availableTopics);
+    return getFirstTopicId(availableTopics, roomId);
   }
   
   return nextTopicId;
@@ -323,7 +376,8 @@ function determineNextTopic(currentTopicId: string): string | null {
 /**
  * Clear all topic transition timers
  */
-function clearAllTransitionTimers(): void {
+function clearAllTransitionTimers(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (state.congratsTimer) {
     clearTimeout(state.congratsTimer);
     state.congratsTimer = null;
@@ -344,34 +398,37 @@ function clearAllTransitionTimers(): void {
 function emitCongratsAndScheduleCountdown(
   currentTopicId: string,
   nextTopicId: string | null,
-  summary: TopicSummary,
-  isSeriesComplete: boolean
+  isSeriesComplete: boolean,
+  roomId: string = DEFAULT_ROOM_ID
 ): void {
-  const config = getTopicSequenceConfig();
+  const config = getTopicSequenceConfig(roomId);
+  const state = getControllerState(roomId);
+
+  console.log(`[Controller] Emitting congrats for ${currentTopicId} (${config.congratsDisplayTimeMs}ms)`);
   
+  state.inCongrats = true;
+  state.pendingNextTopicId = nextTopicId;
+  markControllerChanged();
   const congratsEvent: CongratsEvent = {
     type: "congrats",
     topicId: currentTopicId,
     topicTitle: topicIdToTitle(currentTopicId),
-    summary,
+    summary: buildTopicSummary(roomId),
     displayDurationMs: config.congratsDisplayTimeMs,
     endsAtMs: Date.now() + config.congratsDisplayTimeMs,
     nextTopicId,
     nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
     isSeriesComplete,
   };
-  
-  console.log(`[Controller] Emitting congrats for ${currentTopicId} (${config.congratsDisplayTimeMs}ms)`);
-  
-  state.inCongrats = true;
-  state.pendingNextTopicId = nextTopicId;
-  broadcastEvent(congratsEvent);
+
+  broadcastEvent(congratsEvent, roomId);
   
   // Schedule countdown after congrats (if auto-advance enabled and next topic exists)
   if (config.autoAdvance && nextTopicId) {
     state.congratsTimer = setTimeout(() => {
       state.inCongrats = false;
-      emitCountdownForTopic(nextTopicId);
+      markControllerChanged();
+      emitCountdownForTopic(nextTopicId, roomId);
     }, config.congratsDisplayTimeMs);
   }
 }
@@ -379,9 +436,10 @@ function emitCongratsAndScheduleCountdown(
 /**
  * Emit countdown event and schedule topic start
  */
-function emitCountdownForTopic(topicId: string): void {
-  const config = getTopicSequenceConfig();
+function emitCountdownForTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): void {
+  const config = getTopicSequenceConfig(roomId);
   const countdownSeconds = config.countdownSeconds;
+  const state = getControllerState(roomId);
   
   const event: TopicCountdownEvent = {
     type: "topicCountdown",
@@ -394,12 +452,14 @@ function emitCountdownForTopic(topicId: string): void {
   console.log(`[Controller] Emitting countdown (${countdownSeconds}s) for ${topicId}`);
   
   state.inCountdown = true;
-  broadcastEvent(event);
+  markControllerChanged();
+  broadcastEvent(event, roomId);
   
   // Schedule topic start after countdown
   state.countdownTimer = setTimeout(() => {
     state.inCountdown = false;
-    startNextTopic(topicId);
+    markControllerChanged();
+    startNextTopic(topicId, roomId);
   }, countdownSeconds * 1000);
 }
 
@@ -407,51 +467,51 @@ function emitCountdownForTopic(topicId: string): void {
  * Emit topic complete event and handle transition
  * Flow: topicComplete → congrats (5s) → countdown (10s) → next topic
  */
-function emitTopicComplete(): void {
-  const currentTopicId = getActiveTopicId();
+function emitTopicComplete(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
+  const currentTopicId = getActiveTopicId(roomId);
   if (!currentTopicId) {
     console.log("[Controller] No active topic to complete");
     return;
   }
 
-  const config = getTopicSequenceConfig();
-  const summary = buildTopicSummary();
-  
+  const config = getTopicSequenceConfig(roomId);
   // Determine next topic (considers repeat/loop settings)
-  const nextTopicId = determineNextTopic(currentTopicId);
+  const nextTopicId = determineNextTopic(currentTopicId, roomId);
   const availableTopics = getAllTopicIds();
-  const isSeriesComplete = !nextTopicId && isLastTopic(currentTopicId, availableTopics);
+  const isSeriesComplete = !nextTopicId && isLastTopic(currentTopicId, availableTopics, roomId);
 
   // Legacy topicComplete event for backwards compatibility
-  const event: TopicCompleteEvent = {
-    type: "topicComplete",
-    topicId: currentTopicId,
-    topicTitle: topicIdToTitle(currentTopicId),
-    summary,
-    nextTopicId,
-    nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
-    autoAdvanceMs: config.autoAdvance ? (config.congratsDisplayTimeMs + config.countdownSeconds * 1000) : 0,
-    isSeriesComplete,
-  };
-
   console.log(`[Controller] Topic complete: ${currentTopicId} -> ${nextTopicId ?? "END"}`);
   
   // Update state to show we're in topic summary mode
   state.inTopicSummary = true;
   state.summaryTopicId = currentTopicId;
+  markControllerChanged();
   
   // Broadcast the topic complete event (for backwards compat)
-  broadcastEvent(event);
+  const event: TopicCompleteEvent = {
+    type: "topicComplete",
+    topicId: currentTopicId,
+    topicTitle: topicIdToTitle(currentTopicId),
+    summary: buildTopicSummary(roomId),
+    nextTopicId,
+    nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
+    autoAdvanceMs: config.autoAdvance ? (config.congratsDisplayTimeMs + config.countdownSeconds * 1000) : 0,
+    isSeriesComplete,
+  };
+  broadcastEvent(event, roomId);
 
   // Start the congrats → countdown → next topic flow
-  clearAllTransitionTimers();
-  emitCongratsAndScheduleCountdown(currentTopicId, nextTopicId, summary, isSeriesComplete);
+  clearAllTransitionTimers(roomId);
+  emitCongratsAndScheduleCountdown(currentTopicId, nextTopicId, isSeriesComplete, roomId);
 }
 
 /**
  * Clear topic transition timer
  */
-function clearTopicTransitionTimer(): void {
+function clearTopicTransitionTimer(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (state.topicTransitionTimer) {
     clearTimeout(state.topicTransitionTimer);
     state.topicTransitionTimer = null;
@@ -461,7 +521,8 @@ function clearTopicTransitionTimer(): void {
 /**
  * Start the next topic in sequence
  */
-export function startNextTopic(topicId: string): void {
+export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   console.log(`[Controller] Starting next topic: ${topicId}`);
   
   // Clear all transition state
@@ -470,14 +531,15 @@ export function startNextTopic(topicId: string): void {
   state.inCongrats = false;
   state.inCountdown = false;
   state.pendingNextTopicId = null;
-  clearAllTransitionTimers();
+  clearAllTransitionTimers(roomId);
   
   // Reset scores and streaks for new topic (preserve registrations)
-  resetScoresAndStreaks();
-  clearPlayerStats();
+  resetScoresAndStreaks(roomId);
+  clearPlayerStats(roomId);
+  clearAllAnswers(roomId);
   
   // Set new pool for the topic
-  const poolSize = setActivePool([topicId], false); // No shuffle - keep question order
+  const poolSize = setActivePoolForRoom([topicId], false, roomId); // No shuffle - keep question order
   
   if (poolSize === 0) {
     console.error(`[Controller] No questions found for topic: ${topicId}`);
@@ -486,20 +548,21 @@ export function startNextTopic(topicId: string): void {
   
   // Reset to first question
   state.questionIndex = 0;
+  markControllerChanged();
   
   // Clear any pending timers
-  clearTimer();
+  clearTimer(roomId);
   
   // Emit topicStart event so UI can reset its state
-  emitTopicStart(topicId);
+  emitTopicStart(topicId, roomId);
   
   // Start the quiz for the new topic
   if (state.running) {
-    enterOpenPhase();
+    enterOpenPhase(roomId);
   } else {
     console.log(`[Controller] Topic loaded but controller not running. Call start() to begin.`);
     // Broadcast current state so UI updates
-    broadcastState();
+    broadcastState(roomId);
   }
 }
 
@@ -507,14 +570,15 @@ export function startNextTopic(topicId: string): void {
  * Advance to next question and enter OPEN phase
  * Handles topic completion when reaching the last question
  */
-function advanceToNextQuestion(): void {
+function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   // Clear answers for the completed question
-  clearAnswersForQuestion(state.questionIndex);
+  clearAnswersForQuestion(state.questionIndex, roomId);
 
   // Check if this was the last question in the topic
-  if (isLastQuestion()) {
+  if (isLastQuestion(roomId)) {
     console.log(`[Controller] Last question completed for topic`);
-    emitTopicComplete();
+    emitTopicComplete(roomId);
     // Don't advance - wait for topic transition (auto or manual)
     return;
   }
@@ -525,7 +589,7 @@ function advanceToNextQuestion(): void {
   console.log(`[Controller] Advancing to Q${state.questionIndex + 1}`);
 
   // Enter OPEN phase for new question
-  enterOpenPhase();
+  enterOpenPhase(roomId);
 }
 
 // ============== Public API ==============
@@ -533,82 +597,89 @@ function advanceToNextQuestion(): void {
 /**
  * Get current quiz state (for /state endpoint)
  */
-export function getCurrentState(): QuizState {
-  return buildQuizState();
+export function getCurrentState(roomId: string = DEFAULT_ROOM_ID): QuizState {
+  return buildQuizState(roomId);
 }
 
 /**
  * Check if controller is running
  */
-export function isRunning(): boolean {
-  return state.running;
+export function isRunning(roomId: string = DEFAULT_ROOM_ID): boolean {
+  return getControllerState(roomId).running;
 }
 
 /**
  * Get current phase
  */
-export function getCurrentPhase(): QuizPhase {
-  return state.phase;
+export function getCurrentPhase(roomId: string = DEFAULT_ROOM_ID): QuizPhase {
+  return getControllerState(roomId).phase;
 }
 
 /**
  * Get current question index
  */
-export function getQuestionIndex(): number {
-  return state.questionIndex;
+export function getQuestionIndex(roomId: string = DEFAULT_ROOM_ID): number {
+  return getControllerState(roomId).questionIndex;
 }
 
 /**
  * Start the controller loop
  */
-export function start(): void {
+export function start(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (state.running) {
     console.log("[Controller] Already running");
     return;
   }
 
   state.running = true;
+  markControllerChanged();
   console.log("[Controller] Starting quiz controller");
 
   // Start with OPEN phase
-  enterOpenPhase();
+  enterOpenPhase(roomId);
 }
 
 /**
  * Pause the controller (stops timers, keeps state)
  */
-export function pause(): void {
+export function pause(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (!state.running) {
     console.log("[Controller] Not running");
     return;
   }
 
-  clearTimer();
+  clearTimer(roomId);
   state.running = false;
+  state.endsAtMs = 0;
+  markControllerChanged();
   console.log("[Controller] Paused");
 }
 
 /**
  * Skip to next question immediately
  */
-export function skipToNext(): void {
+export function skipToNext(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   if (!state.running) {
     console.log("[Controller] Not running, starting first");
-    start();
+    start(roomId);
     return;
   }
 
   console.log("[Controller] Skipping to next question");
-  clearTimer();
-  advanceToNextQuestion();
+  clearTimer(roomId);
+  advanceToNextQuestion(roomId);
 }
 
 /**
  * Reset all scores, streaks, and restart from question 0
  */
-export function reset(): void {
-  clearTimer();
-  clearTopicTransitionTimer();
+export function reset(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
+  clearTimer(roomId);
+  clearTopicTransitionTimer(roomId);
   state.running = false;
   state.questionIndex = 0;
   state.phase = "OPEN";
@@ -616,42 +687,53 @@ export function reset(): void {
   state.openStartMs = 0;
   state.inTopicSummary = false;
   state.summaryTopicId = null;
+  state.inCongrats = false;
+  state.inCountdown = false;
+  state.pendingNextTopicId = null;
 
-  resetAllPlayers();
-  clearPlayerStats();
+  resetScoresAndStreaks(roomId);
+  clearPlayerStats(roomId);
+  clearAllAnswers(roomId);
+  markControllerChanged();
 
   console.log("[Controller] Reset complete");
-  broadcastState();
+  broadcastState(roomId);
 }
 
 /**
  * Handle active pool updates without resetting player scores.
  * Starts from Q1 of the new pool so answer indexing stays consistent.
  */
-export function onPoolUpdated(): void {
+export function onPoolUpdated(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   state.questionIndex = 0;
   state.inTopicSummary = false;
   state.summaryTopicId = null;
-  clearTopicTransitionTimer();
+  state.inCongrats = false;
+  state.inCountdown = false;
+  state.pendingNextTopicId = null;
+  clearTopicTransitionTimer(roomId);
 
   if (!state.running) {
     state.phase = "OPEN";
     state.endsAtMs = 0;
     state.openStartMs = 0;
+    markControllerChanged();
     console.log("[Controller] Pool updated (idle) - reset to Q1");
-    broadcastState();
+    broadcastState(roomId);
     return;
   }
 
-  clearTimer();
+  clearTimer(roomId);
+  markControllerChanged();
   console.log("[Controller] Pool updated (running) - restarting from Q1");
-  enterOpenPhase();
+  enterOpenPhase(roomId);
 }
 
 /**
  * Get controller status for debugging/admin
  */
-export function getStatus(): {
+export function getStatus(roomId: string = DEFAULT_ROOM_ID): {
   running: boolean;
   phase: QuizPhase;
   questionIndex: number;
@@ -665,19 +747,20 @@ export function getStatus(): {
   currentTopicId: string | null;
   summaryTopicId: string | null;
 } {
-  const activePoolSize = getActivePoolSize();
+  const state = getControllerState(roomId);
+  const activePoolSize = getActivePoolSize(roomId);
   return {
     running: state.running,
     phase: state.phase,
     questionIndex: state.questionIndex,
-    totalQuestions: getTotalQuestions(),
+    totalQuestions: getTotalQuestions(roomId),
     questionSource: activePoolSize > 0 ? "active_pool" : "legacy_fallback",
     scoringMode: getScoringMode(),
     endsAtMs: state.endsAtMs,
     timeRemainingMs: Math.max(0, state.endsAtMs - Date.now()),
-    connectedClients: getClientCount(),
+    connectedClients: roomId === DEFAULT_ROOM_ID ? getClientCount() : getClientCountForRoom(roomId),
     inTopicSummary: state.inTopicSummary,
-    currentTopicId: getActiveTopicId(),
+    currentTopicId: getActiveTopicId(roomId),
     summaryTopicId: state.summaryTopicId,
   };
 }
@@ -685,36 +768,40 @@ export function getStatus(): {
 /**
  * Check if currently in topic summary display mode
  */
-export function isInTopicSummary(): boolean {
-  return state.inTopicSummary;
+export function isInTopicSummary(roomId: string = DEFAULT_ROOM_ID): boolean {
+  return getControllerState(roomId).inTopicSummary;
 }
 
 /**
  * Get pending next topic ID (if in summary and auto-advance scheduled)
  */
-export function getPendingNextTopic(): string | null {
+export function getPendingNextTopic(roomId: string = DEFAULT_ROOM_ID): string | null {
+  const state = getControllerState(roomId);
   if (!state.inTopicSummary) return null;
-  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+  const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
   if (!currentTopicId) return null;
-  return getNextTopicId(currentTopicId, getAllTopicIds());
+  return getNextTopicId(currentTopicId, getAllTopicIds(), roomId);
 }
 
 /**
  * Cancel auto-advance and stay on topic summary screen
  * Admin can then manually start next topic when ready
  */
-export function cancelAutoAdvance(): void {
-  clearAllTransitionTimers();
+export function cancelAutoAdvance(roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
+  clearAllTransitionTimers(roomId);
   state.inCongrats = false;
   state.inCountdown = false;
+  state.pendingNextTopicId = null;
+  markControllerChanged();
   console.log("[Controller] Auto-advance cancelled");
 }
 
 /**
  * Emit topic start event to all clients
  */
-function emitTopicStart(topicId: string): void {
-  const config = getTopicSequenceConfig();
+function emitTopicStart(topicId: string, roomId: string = DEFAULT_ROOM_ID): void {
+  const config = getTopicSequenceConfig(roomId);
   const availableTopics = getAllTopicIds();
   const sequence = config.topicSequence.length > 0 
     ? config.topicSequence 
@@ -731,13 +818,14 @@ function emitTopicStart(topicId: string): void {
   };
   
   console.log(`[Controller] Emitting topicStart: ${topicId}`);
-  broadcastEvent(event);
+  broadcastEvent(event, roomId);
 }
 
 /**
  * Emit topic countdown event and schedule topic start
  */
-export function emitTopicCountdown(topicId: string, countdownSeconds: number): void {
+export function emitTopicCountdown(topicId: string, countdownSeconds: number, roomId: string = DEFAULT_ROOM_ID): void {
+  const state = getControllerState(roomId);
   const endsAtMs = Date.now() + (countdownSeconds * 1000);
   
   const event: TopicCountdownEvent = {
@@ -749,15 +837,16 @@ export function emitTopicCountdown(topicId: string, countdownSeconds: number): v
   };
   
   console.log(`[Controller] Emitting topicCountdown: ${countdownSeconds}s for ${topicId}`);
-  broadcastEvent(event);
+  broadcastEvent(event, roomId);
   
   // Clear any existing timers
-  clearTimer();
-  clearTopicTransitionTimer();
+  clearTimer(roomId);
+  clearTopicTransitionTimer(roomId);
+  markControllerChanged();
   
   // Schedule topic start after countdown
   state.topicTransitionTimer = setTimeout(() => {
-    startNextTopic(topicId);
+    startNextTopic(topicId, roomId);
   }, countdownSeconds * 1000);
 }
 
@@ -765,15 +854,16 @@ export function emitTopicCountdown(topicId: string, countdownSeconds: number): v
  * Skip current topic and move to the next without showing summary
  * Resets scores/streaks and starts next topic immediately
  */
-export function skipCurrentTopic(): { success: boolean; nextTopicId: string | null } {
-  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+export function skipCurrentTopic(roomId: string = DEFAULT_ROOM_ID): { success: boolean; nextTopicId: string | null } {
+  const state = getControllerState(roomId);
+  const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
   
   if (!currentTopicId) {
     console.log("[Controller] No active topic to skip");
     return { success: false, nextTopicId: null };
   }
   
-  const nextTopicId = getNextTopicId(currentTopicId, getAllTopicIds());
+  const nextTopicId = getNextTopicId(currentTopicId, getAllTopicIds(), roomId);
   
   if (!nextTopicId) {
     console.log("[Controller] No next topic available to skip to");
@@ -785,10 +875,11 @@ export function skipCurrentTopic(): { success: boolean; nextTopicId: string | nu
   // Clear summary state and timers
   state.inTopicSummary = false;
   state.summaryTopicId = null;
-  clearTopicTransitionTimer();
+  clearTopicTransitionTimer(roomId);
+  markControllerChanged();
   
   // Start the next topic (this will reset scores/streaks)
-  startNextTopic(nextTopicId);
+  startNextTopic(nextTopicId, roomId);
   
   return { success: true, nextTopicId };
 }
@@ -797,8 +888,9 @@ export function skipCurrentTopic(): { success: boolean; nextTopicId: string | nu
  * Replay the current topic from the beginning
  * Resets scores/streaks and restarts same topic
  */
-export function replayTopic(): { success: boolean; topicId: string | null } {
-  const currentTopicId = state.summaryTopicId || getActiveTopicId();
+export function replayTopic(roomId: string = DEFAULT_ROOM_ID): { success: boolean; topicId: string | null } {
+  const state = getControllerState(roomId);
+  const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
   
   if (!currentTopicId) {
     console.log("[Controller] No active topic to replay");
@@ -810,10 +902,66 @@ export function replayTopic(): { success: boolean; topicId: string | null } {
   // Clear summary state and timers
   state.inTopicSummary = false;
   state.summaryTopicId = null;
-  clearTopicTransitionTimer();
+  clearTopicTransitionTimer(roomId);
+  markControllerChanged();
   
   // Start the same topic (this will reset scores/streaks)
-  startNextTopic(currentTopicId);
+  startNextTopic(currentTopicId, roomId);
   
   return { success: true, topicId: currentTopicId };
+}
+
+export function getControllerPersistenceSnapshot(): PersistedControllerSnapshot {
+  return {
+    rooms: [...controllerStates.entries()].map(([roomId, state]) => ({
+      roomId,
+      running: state.running,
+      questionIndex: state.questionIndex,
+      phase: state.phase,
+      endsAtMs: state.endsAtMs,
+      openStartMs: state.openStartMs,
+      inCongrats: state.inCongrats,
+      inCountdown: state.inCountdown,
+      inTopicSummary: state.inTopicSummary,
+      summaryTopicId: state.summaryTopicId,
+      pendingNextTopicId: state.pendingNextTopicId,
+    })),
+  };
+}
+
+export function hydrateControllerPersistenceSnapshot(
+  snapshot: PersistedControllerSnapshot | null | undefined
+): void {
+  controllerStates.forEach((_state, roomId) => {
+    clearTimer(roomId);
+    clearAllTransitionTimers(roomId);
+  });
+  controllerStates.clear();
+
+  const persistedRooms = snapshot?.rooms;
+  if (persistedRooms && persistedRooms.length > 0) {
+    for (const persistedState of persistedRooms) {
+      const state = createControllerState();
+      state.running = false;
+      state.questionIndex = Math.max(0, persistedState.questionIndex ?? 0);
+      state.phase = "OPEN";
+      state.endsAtMs = 0;
+      state.openStartMs = 0;
+      state.inCongrats = false;
+      state.inCountdown = false;
+      state.inTopicSummary = persistedState.inTopicSummary ?? false;
+      state.summaryTopicId = persistedState.summaryTopicId ?? null;
+      state.pendingNextTopicId = state.inTopicSummary ? persistedState.pendingNextTopicId ?? null : null;
+
+      const maxIndex = Math.max(0, getTotalQuestions(persistedState.roomId) - 1);
+      state.questionIndex = Math.min(state.questionIndex, maxIndex);
+      controllerStates.set(persistedState.roomId, state);
+    }
+    return;
+  }
+
+  const legacyState = createControllerState();
+  legacyState.running = false;
+  legacyState.questionIndex = 0;
+  controllerStates.set(DEFAULT_ROOM_ID, legacyState);
 }

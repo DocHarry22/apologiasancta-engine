@@ -16,18 +16,25 @@ import adminYoutubeRouter from "./routes/adminYoutube";
 import contentAdminRouter from "./routes/content";
 import registerRouter from "./routes/register";
 import topicsRouter from "./routes/topics";
+import roomsRouter from "./routes/rooms";
+import leaderboardRouter from "./routes/leaderboard";
 import { getStatus } from "./engine/roundController";
 
 /**
  * Parse ALLOWED_ORIGIN env var as comma-separated list
  */
 function parseAllowedOrigins(): string[] {
-  const origins: string[] = [
-    "http://localhost:3000",
-    "http://localhost:3001", // Fallback port when 3000 is in use
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-  ];
+  const isDev = process.env.NODE_ENV !== "production";
+  const origins = new Set<string>(
+    isDev
+      ? [
+          "http://localhost:3000",
+          "http://localhost:3001",
+          "http://localhost:5173",
+          "http://127.0.0.1:3000",
+        ]
+      : []
+  );
 
   const envOrigins = process.env.ALLOWED_ORIGIN;
   if (envOrigins) {
@@ -35,10 +42,16 @@ function parseAllowedOrigins(): string[] {
       .split(",")
       .map((o) => o.trim())
       .filter((o) => o.length > 0);
-    origins.push(...parsed);
+    for (const origin of parsed) {
+      origins.add(origin);
+    }
   }
 
-  return origins;
+  if (!isDev && origins.size === 0) {
+    console.warn("[Config] No ALLOWED_ORIGIN values configured in production; browser clients will be blocked by CORS.");
+  }
+
+  return [...origins];
 }
 
 const allowedOrigins = parseAllowedOrigins();
@@ -88,6 +101,8 @@ export function createApp(): express.Application {
   app.use("/events", eventsRouter);
   app.use("/answer", answerRouter);
   app.use("/register", registerRouter);
+  app.use("/rooms", roomsRouter);
+  app.use("/leaderboard", leaderboardRouter);
   app.use("/topics", topicsRouter); // Public content browsing
   app.use("/admin", adminRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
@@ -105,8 +120,10 @@ export function createApp(): express.Application {
         events: "GET /events?userId=... - SSE stream (personalized if userId provided)",
         answer: "POST /answer - Submit answer",
         register: "POST /register - Register unique username, GET /me/:userId, GET /rank/:userId, POST /rename",
+        rooms: "GET /rooms - List rooms, GET /rooms/:roomId - Room summary",
+        leaderboard: "GET /leaderboard?period=all-time|daily|weekly - Global leaderboard, GET /rooms/:roomId/leaderboard - Room leaderboard",
         topics: "GET /topics - List topics with counts, GET /topics/:id - Topic details (public)",
-        admin: "POST /admin/* - Admin controls (requires x-admin-token)",
+        admin: "POST /admin/start|resume|pause|next|reset|persistence/save - Admin controls (requires x-admin-token)",
         youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
         content: "POST /admin/content/* - Content management (requires x-admin-token)",
         quizSet: "POST /admin/quiz/set - Set active quiz pool (requires x-admin-token)",

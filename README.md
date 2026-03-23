@@ -10,6 +10,7 @@ Backend engine for **Apologia Sancta Live** — a real-time theology quiz platfo
 - **Unified Leaderboard** — Single scoreboard for YouTube + mobile players
 - **Personalized SSE Streams** — Optional `?userId=` parameter for personal rank/score
 - **Scoring System** — Time-based scoring with difficulty multipliers and streaks
+- **Runtime Persistence** — Rooms, memberships, players, and leaderboard history survive engine restarts
 
 ## Architecture
 
@@ -71,6 +72,9 @@ YOUTUBE_VIDEO_ID=optional_default_video_id
 OPEN_SECONDS=25
 LOCK_SECONDS=2
 REVEAL_SECONDS=12
+
+# Runtime persistence (optional)
+STATE_FILE_PATH=./data/runtime-state.json
 ```
 
 ### Running
@@ -99,18 +103,24 @@ npm start
 | `/register/me?userId=...` | GET | Get player info |
 | `/register/rank?userId=...` | GET | Get player rank |
 | `/register/check?username=...` | GET | Check username availability |
+| `/leaderboard?period=all-time\|daily\|weekly` | GET | Global leaderboard snapshots |
+| `/rooms/:roomId/leaderboard?period=all-time\|daily\|weekly` | GET | Room leaderboard snapshots |
 
 ### Admin (requires `x-admin-token` header)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/admin/start` | POST | Start quiz |
+| `/admin/resume` | POST | Resume from restored quiz checkpoint |
 | `/admin/pause` | POST | Pause quiz |
 | `/admin/skip` | POST | Skip to next question |
 | `/admin/reset` | POST | Reset all scores |
+| `/admin/persistence/save` | POST | Force-save current runtime snapshot |
 | `/admin/youtube/connect` | POST | Connect to YouTube live |
 | `/admin/youtube/disconnect` | POST | Disconnect YouTube |
 | `/admin/youtube/status` | GET | Get YouTube poller status |
+
+Runtime snapshots now include the in-memory content bank, active pool order, topic-sequence settings, room registry, memberships, player state, and leaderboard history. On restart, the engine restores the current question position in a paused state; it does not automatically resume timers mid-round.
 
 ## YouTube Integration
 

@@ -8,6 +8,12 @@
 /** Quiz phase controlled by server */
 export type QuizPhase = "OPEN" | "LOCKED" | "REVEAL";
 
+/** Leaderboard time windows */
+export type LeaderboardPeriod = "daily" | "weekly" | "all-time";
+
+/** Leaderboard scope */
+export type LeaderboardScope = "room" | "global";
+
 /** Answer choice */
 export interface Choice {
   id: string;
@@ -41,6 +47,26 @@ export interface Streaker {
 export interface Leaderboard {
   topScorers: Scorer[];
   topStreaks: Streaker[];
+  scope?: LeaderboardScope;
+  period?: LeaderboardPeriod;
+  roomId?: string;
+  roomName?: string;
+  snapshotAtMs?: number;
+}
+
+/** Room summary shown in room lists and selectors */
+export interface RoomSummary {
+  roomId: string;
+  name: string;
+  isActive: boolean;
+  playerCount: number;
+}
+
+/** Player membership in a room */
+export interface RoomMembership {
+  roomId: string;
+  userId: string;
+  joinedAt: number;
 }
 
 /** Teaching moment content */
@@ -75,6 +101,12 @@ export interface QuizState {
   /** Theme/topic title */
   themeTitle: string;
 
+  /** Current room identity */
+  roomId?: string;
+
+  /** Current room name */
+  roomName?: string;
+
   /** Current question data */
   question: Question;
 
@@ -101,6 +133,8 @@ export interface PlayerInfo {
   streak: number;
   rank?: number;
   distanceToTop10?: number;
+  roomId?: string;
+  roomName?: string;
 }
 
 // ============== Topic Completion Types ==============

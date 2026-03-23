@@ -4,9 +4,10 @@
  */
 
 import type { Response } from "express";
-import { getState } from "../state/store";
+import { getStateForRoom } from "../state/store";
 import { getPlayerInfo } from "../state/players";
 import type { QuizState } from "../types/quiz";
+import { DEFAULT_ROOM_ID } from "../state/rooms";
 
 /** SSE Client connection */
 interface SSEClient {
@@ -15,6 +16,7 @@ interface SSEClient {
   connectedAt: number;
   /** Optional userId for personalized streams */
   userId?: string;
+  roomId: string;
 }
 
 /** Active client connections */
@@ -65,20 +67,24 @@ function sendComment(client: SSEClient, comment: string): boolean {
  * Adds 'me' field if client has userId
  */
 function getPersonalizedState(client: SSEClient): QuizState {
-  const state = getState();
+  const state = getStateForRoom(client.roomId);
   
   if (!client.userId) {
     return state;
   }
   
-  const playerInfo = getPlayerInfo(client.userId);
+  const playerInfo = getPlayerInfo(client.userId, client.roomId);
   if (!playerInfo) {
     return state;
   }
   
   return {
     ...state,
-    me: playerInfo,
+    me: {
+      ...playerInfo,
+      roomId: client.roomId,
+      roomName: state.roomName,
+    },
   };
 }
 
@@ -87,20 +93,21 @@ function getPersonalizedState(client: SSEClient): QuizState {
  * @param res - Express Response object
  * @param userId - Optional userId for personalized streams
  */
-export function addClient(res: Response, userId?: string): string {
+export function addClient(res: Response, userId?: string, roomId: string = DEFAULT_ROOM_ID): string {
   const id = generateClientId();
   const client: SSEClient = {
     id,
     res,
     connectedAt: Date.now(),
     userId,
+    roomId,
   };
 
   clients.set(id, client);
   
   const isDev = process.env.NODE_ENV !== "production";
   if (isDev) {
-    console.log(`[SSE] Client connected: ${id}${userId ? ` (userId: ${userId})` : ""} (total: ${clients.size})`);
+    console.log(`[SSE] Client connected: ${id}${userId ? ` (userId: ${userId})` : ""} room=${roomId} (total: ${clients.size})`);
   }
 
   // Send current state immediately on connect (personalized if userId provided)
@@ -139,19 +146,11 @@ export function removeClient(id: string): void {
  * Broadcast state update to all connected clients
  * Each client gets personalized state if they have userId
  */
-export function broadcast(state: unknown): void {
+export function broadcast(_state: unknown): void {
   const failedClients: string[] = [];
-  const baseState = state as QuizState;
 
   clients.forEach((client) => {
-    // Personalize state for clients with userId
-    let clientState = baseState;
-    if (client.userId) {
-      const playerInfo = getPlayerInfo(client.userId);
-      if (playerInfo) {
-        clientState = { ...baseState, me: playerInfo };
-      }
-    }
+    const clientState = getPersonalizedState(client);
     
     const success = sendMessage(client, clientState);
     if (!success) {
@@ -173,10 +172,14 @@ export function broadcast(state: unknown): void {
  * Used for special events like topicComplete, seriesComplete.
  * Events are sent with their type field preserved.
  */
-export function broadcastEvent<T extends { type: string }>(event: T): void {
+export function broadcastEvent<T extends { type: string }>(event: T, roomId?: string): void {
   const failedClients: string[] = [];
 
   clients.forEach((client) => {
+    if (roomId && client.roomId !== roomId) {
+      return;
+    }
+
     const success = sendMessage(client, event as Record<string, unknown>);
     if (!success) {
       failedClients.push(client.id);
@@ -243,4 +246,20 @@ function stopHeartbeat(): void {
  */
 export function getClientCount(): number {
   return clients.size;
+}
+
+export function getClientCountForRoom(roomId: string): number {
+  let count = 0;
+  clients.forEach((client) => {
+    if (client.roomId === roomId) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
+export function resetBrokerForTests(): void {
+  clients.clear();
+  stopHeartbeat();
 }

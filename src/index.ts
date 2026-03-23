@@ -3,15 +3,53 @@
  */
 
 import "dotenv/config";
+import type { Server } from "http";
 import { createApp, allowedOrigins } from "./app";
 import { syncFromGitHub, getSyncStatus, getGitHubSyncConfig } from "./content/github";
+import { getContentBankPersistenceSnapshot, hydrateContentBankPersistenceSnapshot } from "./content/bank";
+import {
+  getTopicSequencePersistenceSnapshot,
+  hydrateTopicSequencePersistenceSnapshot,
+} from "./config/topicSequence";
+import {
+  getControllerPersistenceSnapshot,
+  hydrateControllerPersistenceSnapshot,
+} from "./engine/roundController";
 import { getScoringMode } from "./engine/scoring";
+import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot } from "./state/players";
+import {
+  configureStatePersistence,
+  flushPersistence,
+  getStatePersistencePath,
+  restorePersistedState,
+} from "./state/persistence";
+import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
 const OPEN_SECONDS = process.env.OPEN_SECONDS || "25";
 const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
+
+let server: Server | null = null;
+let shuttingDown = false;
+
+configureStatePersistence({
+  getSnapshot: () => ({
+    content: getContentBankPersistenceSnapshot(),
+    topicSequence: getTopicSequencePersistenceSnapshot(),
+    controller: getControllerPersistenceSnapshot(),
+    rooms: getRoomsPersistenceSnapshot(),
+    players: getPlayersPersistenceSnapshot(),
+  }),
+  applySnapshot: (snapshot) => {
+    hydrateContentBankPersistenceSnapshot(snapshot.content as ReturnType<typeof getContentBankPersistenceSnapshot>);
+    hydrateTopicSequencePersistenceSnapshot(snapshot.topicSequence as ReturnType<typeof getTopicSequencePersistenceSnapshot>);
+    hydrateRoomsPersistenceSnapshot(snapshot.rooms as ReturnType<typeof getRoomsPersistenceSnapshot>);
+    hydratePlayersPersistenceSnapshot(snapshot.players as ReturnType<typeof getPlayersPersistenceSnapshot>);
+    hydrateControllerPersistenceSnapshot(snapshot.controller as ReturnType<typeof getControllerPersistenceSnapshot>);
+  },
+});
 
 const app = createApp();
 
@@ -44,11 +82,58 @@ async function autoSync() {
   }
 }
 
-app.listen(port, host, () => {
-  const ytConfigured = process.env.YOUTUBE_API_KEY ? "✓" : "✗";
-  const ghConfigured = getGitHubSyncConfig() ? "✓" : "✗";
-  const scoringMode = getScoringMode();
-  console.log(`
+async function main() {
+  await restorePersistedState();
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    console.log(`[Shutdown] Received ${signal}; flushing runtime state...`);
+
+    try {
+      await flushPersistence();
+      console.log("[Shutdown] Runtime state flushed");
+    } catch (error) {
+      console.error("[Shutdown] Failed to flush runtime state:", error);
+    }
+
+    if (!server) {
+      process.exit(0);
+      return;
+    }
+
+    server.close((error) => {
+      if (error) {
+        console.error("[Shutdown] Failed to close server cleanly:", error);
+        process.exit(1);
+        return;
+      }
+
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      console.error("[Shutdown] Forced exit after timeout");
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+
+  server = app.listen(port, host, () => {
+    const ytConfigured = process.env.YOUTUBE_API_KEY ? "✓" : "✗";
+    const ghConfigured = getGitHubSyncConfig() ? "✓" : "✗";
+    const scoringMode = getScoringMode();
+    console.log(`
 ╔═══════════════════════════════════════════════════════╗
 ║     Apologia Sancta Engine v1.0                       ║
 ║     Listening on ${host}:${port}                         ║
@@ -68,9 +153,17 @@ app.listen(port, host, () => {
 ║  Scoring: ${scoringMode.padEnd(43)}║
 ╚═══════════════════════════════════════════════════════╝
   `);
-  console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
-  console.log(`[Config] Use POST /admin/start to begin the quiz`);
+    console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
+    console.log(`[Config] Runtime state path: ${getStatePersistencePath()}`);
+    console.log("[Config] Use POST /admin/persistence/save to force a runtime snapshot");
+    console.log(`[Config] Use POST /admin/start to begin the quiz`);
 
-  // Auto-sync from GitHub after server starts
-  autoSync();
+    // Auto-sync from GitHub after server starts
+    autoSync();
+  });
+}
+
+main().catch((error) => {
+  console.error("[Startup] Failed to initialize engine:", error);
+  process.exitCode = 1;
 });
