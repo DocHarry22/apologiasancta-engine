@@ -33,6 +33,7 @@ router.get("/", (_req: Request, res: Response) => {
     })),
     persistence: {
       configured: persistence.configured,
+      driver: persistence.driver,
       path: persistence.path,
       savePending: persistence.savePending,
       lastSavedAt: persistence.lastSavedAt,

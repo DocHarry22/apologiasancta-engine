@@ -20,6 +20,7 @@ import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot } from
 import {
   configureStatePersistence,
   flushPersistence,
+  getPersistenceStatus,
   getStatePersistencePath,
   restorePersistedState,
 } from "./state/persistence";
@@ -154,7 +155,7 @@ async function main() {
 ╚═══════════════════════════════════════════════════════╝
   `);
     console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
-    console.log(`[Config] Runtime state path: ${getStatePersistencePath()}`);
+    console.log(`[Config] Runtime persistence: ${getPersistenceStatus().driver} @ ${getStatePersistencePath()}`);
     console.log("[Config] Use POST /admin/persistence/save to force a runtime snapshot");
     console.log(`[Config] Use POST /admin/start to begin the quiz`);
 

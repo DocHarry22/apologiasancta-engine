@@ -50,7 +50,8 @@ YouTube Live Chat                  Mobile / UI clients
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 18+ for file-backed persistence
+- Node.js 22+ to use the built-in SQLite persistence driver
 - npm
 
 ### Installation
@@ -83,7 +84,13 @@ LOCK_SECONDS=2
 REVEAL_SECONDS=12
 
 # Runtime persistence (optional but recommended)
+# Default file-backed snapshot storage
 STATE_FILE_PATH=./data/runtime-state.json
+
+# Optional database-backed snapshot storage
+# If STATE_DB_PATH is set, sqlite mode is selected automatically unless overridden.
+STATE_PERSISTENCE_DRIVER=sqlite
+STATE_DB_PATH=./data/runtime-state.sqlite
 ```
 
 ### Running
@@ -198,6 +205,13 @@ Runtime snapshots include:
 - players, room scores, room streaks, and score event history
 
 On restart, the engine restores the current checkpoint in paused mode. It does not auto-resume timers mid-round.
+
+### Persistence Drivers
+
+- `file` stores the runtime snapshot as formatted JSON at `STATE_FILE_PATH`
+- `sqlite` stores the same runtime snapshot atomically in a local SQLite database at `STATE_DB_PATH`
+
+If `STATE_PERSISTENCE_DRIVER` is unset and `STATE_DB_PATH` is present, the engine automatically uses the SQLite driver.
 
 ## Verification
 

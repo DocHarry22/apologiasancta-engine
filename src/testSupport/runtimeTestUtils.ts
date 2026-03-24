@@ -9,12 +9,35 @@ import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot, reset
 import {
   configureStatePersistence,
   flushPersistence,
+  type PersistenceDriver,
   resetPersistenceForTests,
   restorePersistedState,
+  setStatePersistenceDbPathForTests,
+  setStatePersistenceDriverForTests,
   setStatePersistencePathForTests,
 } from "../state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "../state/rooms";
 import { resetBrokerForTests } from "../sse/broker";
+
+async function removeDirWithRetries(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EBUSY") {
+        throw error;
+      }
+
+      if (attempt === 4) {
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
 
 export async function withPatchedNow<T>(nowMs: number, callback: () => Promise<T> | T): Promise<T> {
   const originalNow = Date.now;
@@ -36,18 +59,28 @@ export function resetRuntimeState(): void {
   hydrateControllerPersistenceSnapshot(null);
 }
 
-export async function createTempStateFilePath(): Promise<{ filePath: string; cleanup: () => Promise<void> }> {
+async function createTempPersistencePath(fileName: string): Promise<{ filePath: string; cleanup: () => Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), "apologia-sancta-engine-tests-"));
   return {
-    filePath: join(dir, "runtime-state.json"),
+    filePath: join(dir, fileName),
     cleanup: async () => {
-      await rm(dir, { recursive: true, force: true });
+      await removeDirWithRetries(dir);
     },
   };
 }
 
-export function configurePersistenceForTests(filePath: string): void {
-  setStatePersistencePathForTests(filePath);
+export async function createTempStateFilePath(): Promise<{ filePath: string; cleanup: () => Promise<void> }> {
+  return createTempPersistencePath("runtime-state.json");
+}
+
+export async function createTempStateDbPath(): Promise<{ filePath: string; cleanup: () => Promise<void> }> {
+  return createTempPersistencePath("runtime-state.sqlite");
+}
+
+export function configurePersistenceForTests(filePath: string, driver: PersistenceDriver = "file"): void {
+  setStatePersistenceDriverForTests(driver);
+  setStatePersistencePathForTests(driver === "file" ? filePath : null);
+  setStatePersistenceDbPathForTests(driver === "sqlite" ? filePath : null);
   configureStatePersistence({
     getSnapshot: () => ({
       content: getContentBankPersistenceSnapshot(),

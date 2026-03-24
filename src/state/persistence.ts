@@ -1,5 +1,6 @@
 import { dirname, resolve } from "path";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, writeFile } from "fs/promises";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 export interface PersistedEnginePayload {
   content: unknown;
@@ -8,6 +9,8 @@ export interface PersistedEnginePayload {
   rooms: unknown;
   players: unknown;
 }
+
+export type PersistenceDriver = "file" | "sqlite";
 
 interface PersistedEngineState extends PersistedEnginePayload {
   version: 1;
@@ -20,6 +23,7 @@ interface PersistenceConfig {
 }
 
 export interface PersistenceStatus {
+  driver: PersistenceDriver;
   configured: boolean;
   path: string;
   savePending: boolean;
@@ -29,7 +33,10 @@ export interface PersistenceStatus {
 }
 
 let stateFilePathOverride: string | null = null;
+let stateDbPathOverride: string | null = null;
+let persistenceDriverOverride: PersistenceDriver | null = null;
 const SAVE_DEBOUNCE_MS = 250;
+const SQLITE_TABLE_NAME = "runtime_state_snapshots";
 
 let persistenceConfig: PersistenceConfig | null = null;
 let saveTimer: NodeJS.Timeout | null = null;
@@ -38,8 +45,47 @@ let isHydrating = false;
 let lastSavedAt: number | null = null;
 let lastRestoredAt: number | null = null;
 let lastRestoreSucceeded = false;
+let sqliteDatabase: DatabaseSyncType | null = null;
+let sqliteDatabasePath: string | null = null;
 
-function getResolvedStateFilePath(): string {
+function parsePersistenceDriver(raw: string | undefined): PersistenceDriver | null {
+  if (raw === "file" || raw === "sqlite") {
+    return raw;
+  }
+
+  return null;
+}
+
+function getResolvedPersistenceDriver(): PersistenceDriver {
+  if (persistenceDriverOverride) {
+    return persistenceDriverOverride;
+  }
+
+  const configuredDriver = parsePersistenceDriver(process.env.STATE_PERSISTENCE_DRIVER);
+  if (configuredDriver) {
+    return configuredDriver;
+  }
+
+  if (process.env.STATE_DB_PATH) {
+    return "sqlite";
+  }
+
+  return "file";
+}
+
+function getResolvedPersistencePath(driver = getResolvedPersistenceDriver()): string {
+  if (driver === "sqlite") {
+    if (stateDbPathOverride) {
+      return stateDbPathOverride;
+    }
+
+    if (process.env.STATE_DB_PATH) {
+      return resolve(process.env.STATE_DB_PATH);
+    }
+
+    return resolve(process.cwd(), "data", "runtime-state.sqlite");
+  }
+
   if (stateFilePathOverride) {
     return stateFilePathOverride;
   }
@@ -51,18 +97,63 @@ function getResolvedStateFilePath(): string {
   return resolve(process.cwd(), "data", "runtime-state.json");
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function closeSqliteDatabase(): void {
+  if (!sqliteDatabase) {
+    return;
+  }
+
+  sqliteDatabase.close();
+  sqliteDatabase = null;
+  sqliteDatabasePath = null;
+}
+
+async function getSqliteDatabase(filePath: string): Promise<DatabaseSyncType> {
+  if (sqliteDatabase && sqliteDatabasePath === filePath) {
+    return sqliteDatabase;
+  }
+
+  closeSqliteDatabase();
+  await mkdir(dirname(filePath), { recursive: true });
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const database = new DatabaseSync(filePath);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ${SQLITE_TABLE_NAME} (
+      slot INTEGER PRIMARY KEY CHECK (slot = 1),
+      version INTEGER NOT NULL,
+      saved_at INTEGER NOT NULL,
+      payload_json TEXT NOT NULL
+    )
+  `);
+
+  sqliteDatabase = database;
+  sqliteDatabasePath = filePath;
+  return database;
+}
+
 export function configureStatePersistence(config: PersistenceConfig): void {
   persistenceConfig = config;
 }
 
 export function getStatePersistencePath(): string {
-  return getResolvedStateFilePath();
+  return getResolvedPersistencePath();
 }
 
 export function getPersistenceStatus(): PersistenceStatus {
+  const driver = getResolvedPersistenceDriver();
   return {
+    driver,
     configured: persistenceConfig !== null,
-    path: getResolvedStateFilePath(),
+    path: getResolvedPersistencePath(driver),
     savePending: saveTimer !== null,
     lastSavedAt,
     lastRestoredAt,
@@ -94,15 +185,38 @@ async function persistNow(): Promise<void> {
     return;
   }
 
+  const driver = getResolvedPersistenceDriver();
   const snapshot: PersistedEngineState = {
     version: 1,
     savedAt: Date.now(),
     ...persistenceConfig.getSnapshot(),
   };
 
-  const stateFilePath = getResolvedStateFilePath();
-  await mkdir(dirname(stateFilePath), { recursive: true });
-  await writeFile(stateFilePath, JSON.stringify(snapshot, null, 2), "utf8");
+  const persistencePath = getResolvedPersistencePath(driver);
+
+  if (driver === "sqlite") {
+    const database = await getSqliteDatabase(persistencePath);
+    database
+      .prepare(
+        `
+          INSERT INTO ${SQLITE_TABLE_NAME} (slot, version, saved_at, payload_json)
+          VALUES (1, @version, @savedAt, @payloadJson)
+          ON CONFLICT(slot) DO UPDATE SET
+            version = excluded.version,
+            saved_at = excluded.saved_at,
+            payload_json = excluded.payload_json
+        `
+      )
+      .run({
+        version: snapshot.version,
+        savedAt: snapshot.savedAt,
+        payloadJson: JSON.stringify(snapshot),
+      });
+  } else {
+    await mkdir(dirname(persistencePath), { recursive: true });
+    await writeFile(persistencePath, JSON.stringify(snapshot, null, 2), "utf8");
+  }
+
   lastSavedAt = snapshot.savedAt;
 }
 
@@ -133,19 +247,46 @@ export async function restorePersistedState(): Promise<boolean> {
     return false;
   }
 
+  const driver = getResolvedPersistenceDriver();
+  const persistencePath = getResolvedPersistencePath(driver);
   let raw: string;
-  const stateFilePath = getResolvedStateFilePath();
-  try {
-    raw = await readFile(stateFilePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+
+  if (driver === "sqlite") {
+    if (!(await pathExists(persistencePath))) {
       lastRestoreSucceeded = false;
       return false;
     }
 
-    console.error("[Persistence] Failed to read runtime state:", error);
-    lastRestoreSucceeded = false;
-    return false;
+    try {
+      const database = await getSqliteDatabase(persistencePath);
+      const row = database
+        .prepare(`SELECT payload_json FROM ${SQLITE_TABLE_NAME} WHERE slot = 1`)
+        .get() as { payload_json: string } | undefined;
+
+      if (!row) {
+        lastRestoreSucceeded = false;
+        return false;
+      }
+
+      raw = row.payload_json;
+    } catch (error) {
+      console.error("[Persistence] Failed to read runtime state database:", error);
+      lastRestoreSucceeded = false;
+      return false;
+    }
+  } else {
+    try {
+      raw = await readFile(persistencePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        lastRestoreSucceeded = false;
+        return false;
+      }
+
+      console.error("[Persistence] Failed to read runtime state:", error);
+      lastRestoreSucceeded = false;
+      return false;
+    }
   }
 
   let parsed: PersistedEngineState;
@@ -179,12 +320,20 @@ export async function restorePersistedState(): Promise<boolean> {
   lastRestoredAt = Date.now();
   lastRestoreSucceeded = true;
   lastSavedAt = parsed.savedAt;
-  console.log(`[Persistence] Restored runtime state from ${stateFilePath}`);
+  console.log(`[Persistence] Restored runtime state from ${persistencePath}`);
   return true;
 }
 
 export function setStatePersistencePathForTests(filePath: string | null): void {
   stateFilePathOverride = filePath ? resolve(filePath) : null;
+}
+
+export function setStatePersistenceDbPathForTests(filePath: string | null): void {
+  stateDbPathOverride = filePath ? resolve(filePath) : null;
+}
+
+export function setStatePersistenceDriverForTests(driver: PersistenceDriver | null): void {
+  persistenceDriverOverride = driver;
 }
 
 export function resetPersistenceForTests(): void {
@@ -200,4 +349,7 @@ export function resetPersistenceForTests(): void {
   lastRestoredAt = null;
   lastRestoreSucceeded = false;
   stateFilePathOverride = null;
+  stateDbPathOverride = null;
+  persistenceDriverOverride = null;
+  closeSqliteDatabase();
 }

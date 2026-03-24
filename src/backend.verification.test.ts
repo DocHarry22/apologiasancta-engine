@@ -13,6 +13,7 @@ import {
 import { createRoom, getRoom, joinRoom } from "./state/rooms";
 import {
   configurePersistenceForTests,
+  createTempStateDbPath,
   createTempStateFilePath,
   resetPersistenceState,
   resetRuntimeState,
@@ -171,10 +172,11 @@ test("admin and health endpoints expose persistence state and closed rooms block
     const healthResponse = await fetch(`${server.baseUrl}/health`);
     assert.equal(healthResponse.status, 200);
     const health = await healthResponse.json() as {
-      persistence: { configured: boolean; path: string; lastSavedAt: number | null };
+      persistence: { configured: boolean; driver: string; path: string; lastSavedAt: number | null };
       roomDetails: Array<{ roomId: string; isActive: boolean }>;
     };
     assert.equal(health.persistence.configured, true);
+    assert.equal(health.persistence.driver, "file");
     assert.equal(health.persistence.path.endsWith("runtime-state.json"), true);
     assert.equal(typeof health.persistence.lastSavedAt, "number");
     assert.equal(health.roomDetails.some((room) => room.roomId === "alpha-room" && room.isActive === false), true);
@@ -256,6 +258,60 @@ test("persistence restore keeps room scores and checkpoint while resuming in pau
 
     const afterRestore = getLeaderboardForPeriod("all-time", { roomId: room.roomId });
     assert.deepEqual(afterRestore.topScorers.map((entry) => entry.name), ["Alice"]);
+
+    const restoredStatus = getStatus(room.roomId);
+    assert.equal(restoredStatus.running, false);
+    assert.equal(restoredStatus.phase, "OPEN");
+    assert.equal(restoredStatus.questionIndex, 1);
+    assert.equal(restoredStatus.endsAtMs, 0);
+  } finally {
+    await resetPersistenceState();
+    await temp.cleanup();
+  }
+});
+
+test("sqlite persistence restore keeps room scores and checkpoint while resuming in paused mode", async () => {
+  const temp = await createTempStateDbPath();
+  configurePersistenceForTests(temp.filePath, "sqlite");
+
+  try {
+    const room = createRoom("SQLite Persistence", "sqlite-persist");
+    ingestQuestions([
+      buildQuestion("q1", "topic-sqlite", "Question one"),
+      buildQuestion("q2", "topic-sqlite", "Question two"),
+    ]);
+    startNextTopic("topic-sqlite", room.roomId);
+
+    const alice = registerPlayer("Alice SQLite", "persist-alice-sqlite");
+    assert.equal(alice.ok, true);
+    initializePlayerRoom(alice.userId!, room.roomId);
+    joinRoom(room.roomId, alice.userId!);
+
+    await scoreCorrectAnswerAt(new Date("2026-03-23T09:00:00").getTime(), room.roomId, alice.userId!);
+
+    start(room.roomId);
+    skipToNext(room.roomId);
+    pause(room.roomId);
+
+    const beforeSave = getLeaderboardForPeriod("all-time", { roomId: room.roomId });
+    assert.deepEqual(beforeSave.topScorers.map((entry) => entry.name), ["Alice_SQLite"]);
+    assert.equal(getStatus(room.roomId).questionIndex, 1);
+    assert.equal(getStatus(room.roomId).running, false);
+
+    const { flushPersistence, getPersistenceStatus } = await import("./state/persistence");
+    await flushPersistence();
+    assert.equal(getPersistenceStatus().driver, "sqlite");
+    assert.equal(getPersistenceStatus().path.endsWith("runtime-state.sqlite"), true);
+
+    resetRuntimeState();
+    const restored = await restoreConfiguredPersistence();
+    assert.equal(restored, true);
+
+    const restoredRoom = getRoom(room.roomId);
+    assert.equal(restoredRoom?.roomId, room.roomId);
+
+    const afterRestore = getLeaderboardForPeriod("all-time", { roomId: room.roomId });
+    assert.deepEqual(afterRestore.topScorers.map((entry) => entry.name), ["Alice_SQLite"]);
 
     const restoredStatus = getStatus(room.roomId);
     assert.equal(restoredStatus.running, false);
