@@ -15,5 +15,5 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "**/*Water-Nest-HP002*.ts", "**/*Water-Nest-HP002*.tsx"]
 }

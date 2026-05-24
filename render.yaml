@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: apologiasancta-engine
+    runtime: node
+    plan: free
+    branch: main
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: apologiasancta-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromDatabase:
+          name: apologiasancta-redis
+          property: connectionString
+      - key: STATE_PERSISTENCE_DRIVER
+        value: sqlite
+      - key: STATE_DB_PATH
+        value: /var/data/runtime-state.sqlite
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBE_VIDEO_ID
+        sync: false
+
+databases:
+  - name: apologiasancta-postgres
+    databaseName: apologiasancta
+    user: apologiasancta
+    plan: free
+    postgresMajorVersion: "15"
+    ipAllowList: []
+
+  - name: apologiasancta-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []

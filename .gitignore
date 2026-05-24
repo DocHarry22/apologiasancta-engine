@@ -24,5 +24,8 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# OneDrive conflict copies
+*-Water-Nest-HP002*
+
 # Test coverage
 coverage/

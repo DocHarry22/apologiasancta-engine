@@ -54,6 +54,52 @@ export interface Leaderboard {
   snapshotAtMs?: number;
 }
 
+/** Per-user answer result event sent after scoring */
+export interface AnswerResultEvent {
+  type: "answerResult";
+  roomId: string;
+  userId: string;
+  questionIndex: number;
+  choiceId: string;
+  correctId?: string;
+  isCorrect: boolean;
+  pointsAwarded: number;
+  streak: number;
+  previousRank?: number;
+  newRank?: number;
+  rankDelta?: number;
+  distanceToTop10?: number;
+}
+
+/** Leaderboard update event sent when room ranking changes */
+export interface LeaderboardChangedEvent {
+  type: "leaderboardChanged";
+  roomId: string;
+  scope: LeaderboardScope;
+  period: LeaderboardPeriod;
+  topScorers: Scorer[];
+  topStreaks: Streaker[];
+  changedUserIds: string[];
+}
+
+/** Stage state shown in room progression UI */
+export interface StageSummary {
+  stageId: string;
+  stageTitle: string;
+  topicId: string;
+  topicTitle: string;
+  status: "locked" | "available" | "active" | "completed";
+}
+
+/** Stage transition event sent when a room changes stage */
+export interface StageChangedEvent {
+  type: "stageChanged";
+  roomId: string;
+  stageId: string;
+  stageTitle: string;
+  status: StageSummary["status"];
+}
+
 /** Room summary shown in room lists and selectors */
 export interface RoomSummary {
   roomId: string;

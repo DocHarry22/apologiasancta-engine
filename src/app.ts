@@ -25,16 +25,27 @@ import { getStatus } from "./engine/roundController";
  */
 function parseAllowedOrigins(): string[] {
   const isDev = process.env.NODE_ENV !== "production";
-  const origins = new Set<string>(
-    isDev
-      ? [
-          "http://localhost:3000",
-          "http://localhost:3001",
-          "http://localhost:5173",
-          "http://127.0.0.1:3000",
-        ]
-      : []
-  );
+  const localDevOrigins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+  ];
+  const productionOrigins = [
+    "https://sandybrown-bear-488955.hostingersite.com",
+    "https://apologiasancta-ui.onrender.com",
+  ];
+  const includeLocalOrigins = isDev || process.env.ALLOW_LOCAL_ORIGINS !== "false";
+  const origins = new Set<string>([
+    ...productionOrigins,
+    ...(includeLocalOrigins ? localDevOrigins : []),
+  ]);
 
   const envOrigins = process.env.ALLOWED_ORIGIN;
   if (envOrigins) {
