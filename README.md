@@ -2,15 +2,36 @@
 
 Backend runtime for Apologia Sancta Live, a room-aware theology battle trivia platform with SSE delivery, mobile and YouTube answer ingestion, leaderboard windows, and restart-safe runtime persistence.
 
-## Release Baseline
+Deployed on Render: `https://apologiasancta-engine.onrender.com`
 
-- Shared live question stream across active rooms
+## Current State (v1 — May 2026)
+
+The engine is live on Render and serving production traffic. All core game mechanics are operational.
+
+**What's working:**
+- Multi-room battle trivia with a pinned `global` room and admin-created player rooms
 - Room-scoped memberships, answers, scores, streaks, and leaderboard views
-- Global identity for players across room switches
-- Daily, weekly, and all-time leaderboard buckets
-- Restart recovery that restores the checkpoint in paused mode
+- Global player identity preserved across room switches
+- SSE streams delivering real-time round state to rooms and individual players
+- Time-based scoring with difficulty multipliers and streak tracking
+- Daily, weekly, and all-time leaderboard windows
+- YouTube Live Chat polling for `!A` / `!B` / `!C` / `!D` answers
+- Restart recovery restoring the checkpoint in **paused** mode (no mid-round auto-resume)
+- Runtime persistence: JSON-file (default) and experimental SQLite backend (`STATE_PERSISTENCE_DRIVER=sqlite`)
+- CI pipeline on GitHub Actions: Node 22 typecheck, tests, and build on every push
 
-The current release does not isolate topic-flow sequencing per room. Live topic progression is still shared engine-wide.
+**Known limitations:**
+- Topic-flow sequencing is still **shared engine-wide** — per-room topic progression isolation is not yet complete
+- Postgres and Redis production adapters are scaffolded in `render.yaml` but not yet wired into live state management; the engine runs on a single Render instance using file-backed persistence
+- SQLite backend emits a Node experimental warning on Node 22
+
+## Future Goals
+
+- **Per-room topic flow** — isolate topic-sequence ordering and repeat counters per room so rooms can run independent question tracks simultaneously
+- **Postgres/Redis runtime adapters** — wire the provisioned Render Postgres and Redis services into the persistence and SSE layers to enable multi-instance horizontal scaling
+- **Nonce-based CSP** — eliminate `unsafe-inline` from script delivery once Next.js nonce support is stable
+- **Signed APK CI pipeline** — verify and enable the GitHub Actions signed APK/AAB release workflow end-to-end
+- **Graceful drain** — allow in-flight SSE connections to complete before a Render deployment replaces the instance
 
 ## Features
 
