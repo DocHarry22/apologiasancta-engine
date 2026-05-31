@@ -182,6 +182,7 @@ test("admin and health endpoints expose persistence state and closed rooms block
     assert.equal(health.roomDetails.some((room) => room.roomId === "alpha-room" && room.isActive === false), true);
   } finally {
     await server.close();
+    await resetPersistenceState();
     await temp.cleanup();
   }
 });

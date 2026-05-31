@@ -26,7 +26,7 @@ async function removeDirWithRetries(dir: string): Promise<void> {
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EBUSY") {
+      if (!["EBUSY", "ENOTEMPTY", "EPERM"].includes(code ?? "")) {
         throw error;
       }
 
