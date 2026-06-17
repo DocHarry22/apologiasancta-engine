@@ -27,6 +27,26 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
+// Periodically prune expired entries to prevent unbounded memory growth.
+// The timer is unref'd so it does not block graceful shutdown.
+const rateLimitCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimitMap) {
+    if (now > entry.resetAt) {
+      rateLimitMap.delete(ip);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS);
+rateLimitCleanupTimer.unref();
+
+/**
+ * Stop the rate-limit cleanup timer.
+ * Call this during application shutdown to release resources cleanly.
+ */
+export function stopRateLimitCleanup(): void {
+  clearInterval(rateLimitCleanupTimer);
+}
+
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   let entry = rateLimitMap.get(ip);

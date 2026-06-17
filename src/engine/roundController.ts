@@ -217,11 +217,10 @@ function generateTickerItems(roomId: string = DEFAULT_ROOM_ID): string[] {
 }
 
 /**
- * Broadcast current state to all clients
+ * Broadcast current state to all clients in the given room
  */
 function broadcastState(roomId: string = DEFAULT_ROOM_ID): void {
-  const quizState = buildQuizState(roomId);
-  broadcast(quizState);
+  broadcast(roomId);
 }
 
 function markControllerChanged(): void {

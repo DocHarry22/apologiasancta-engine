@@ -5,27 +5,11 @@
  * All routes are prefixed with /admin/youtube
  */
 
-import { Router, Request, Response, NextFunction } from "express";
+import { Router, Request, Response } from "express";
 import { createPoller, getPoller, destroyPoller } from "../youtube/poller";
+import { requireAdmin } from "./admin";
 
 const router = Router();
-
-/** Admin token from environment */
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
-
-/**
- * Middleware to verify admin token
- */
-function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const token = req.headers["x-admin-token"] || req.headers["admin-token"];
-
-  if (token !== ADMIN_TOKEN) {
-    res.status(401).json({ error: "Unauthorized - Invalid admin token" });
-    return;
-  }
-
-  next();
-}
 
 // Apply admin auth to all routes
 router.use(requireAdmin);

@@ -25,12 +25,21 @@ import {
   restorePersistedState,
 } from "./state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
+import { stopRateLimitCleanup } from "./routes/register";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
 const OPEN_SECONDS = process.env.OPEN_SECONDS || "25";
 const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
+
+// Warn loudly if the default admin token is used in production
+if (process.env.NODE_ENV === "production" && !process.env.ADMIN_TOKEN) {
+  console.error(
+    "[Security] CRITICAL: ADMIN_TOKEN is not set. " +
+    "The default 'dev-admin-token' is in use — set a strong ADMIN_TOKEN before going live."
+  );
+}
 
 let server: Server | null = null;
 let shuttingDown = false;
@@ -93,6 +102,8 @@ async function main() {
 
     shuttingDown = true;
     console.log(`[Shutdown] Received ${signal}; flushing runtime state...`);
+
+    stopRateLimitCleanup();
 
     try {
       await flushPersistence();

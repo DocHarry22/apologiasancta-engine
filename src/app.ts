@@ -104,7 +104,8 @@ export function createApp(): express.Application {
 
   // Middleware
   app.use(cors(corsOptions));
-  app.use(express.json());
+  // Limit JSON body size to prevent large-payload DoS attacks
+  app.use(express.json({ limit: "64kb" }));
 
   // Routes
   app.use("/health", healthRouter);

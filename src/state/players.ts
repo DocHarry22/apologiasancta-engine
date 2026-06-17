@@ -464,6 +464,17 @@ export function evaluateAnswers(
         streak: playerState.streak,
         atMs: Date.now(),
       });
+      // Prune events older than 8 days to bound memory usage while keeping
+      // enough history for daily/weekly leaderboard windows.
+      const pruneBeforeMs = Date.now() - 8 * 24 * 60 * 60 * 1000;
+      const firstKeptIdx = roomState.scoreEvents.findIndex((ev) => ev.atMs >= pruneBeforeMs);
+      if (firstKeptIdx > 0) {
+        // Partial prune: remove stale entries at the front
+        roomState.scoreEvents.splice(0, firstKeptIdx);
+      } else if (firstKeptIdx === -1) {
+        // All events are beyond the retention window — clear entirely
+        roomState.scoreEvents.length = 0;
+      }
       stateChanged = true;
       console.log(
         `[Scoring] [${roomId}] ${player.username}: +${details.score} pts, streak ${playerState.streak} ` +

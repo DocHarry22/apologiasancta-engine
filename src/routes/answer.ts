@@ -45,6 +45,23 @@ function handleAnswer(req: Request, res: Response, roomId: string): void {
     return;
   }
 
+  // Validate field types and lengths to prevent oversized inputs
+  if (typeof userId !== "string" || userId.length > 200) {
+    res.status(400).json({
+      ok: false,
+      error: "Invalid userId: must be a string of at most 200 characters",
+    });
+    return;
+  }
+
+  if (typeof choiceId !== "string") {
+    res.status(400).json({
+      ok: false,
+      error: "Invalid choiceId: must be a string",
+    });
+    return;
+  }
+
   // Validate choiceId format
   const validChoices = ["a", "b", "c", "d"];
   if (!validChoices.includes(choiceId.toLowerCase())) {
