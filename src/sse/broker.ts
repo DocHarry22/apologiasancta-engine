@@ -143,13 +143,18 @@ export function removeClient(id: string): void {
 }
 
 /**
- * Broadcast state update to all connected clients
- * Each client gets personalized state if they have userId
+ * Broadcast state update to clients in a specific room (or all rooms if omitted).
+ * Each client receives fresh, personalized state so that per-user 'me' data
+ * can be injected server-side.
  */
-export function broadcast(_state: unknown): void {
+export function broadcast(roomId?: string): void {
   const failedClients: string[] = [];
 
   clients.forEach((client) => {
+    if (roomId && client.roomId !== roomId) {
+      return;
+    }
+
     const clientState = getPersonalizedState(client);
     
     const success = sendMessage(client, clientState);

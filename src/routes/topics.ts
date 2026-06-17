@@ -21,11 +21,7 @@ const router = Router();
  * Public endpoint - no authentication required.
  */
 router.get("/", (req: Request, res: Response) => {
-  console.log("[topics] GET /topics called");
   const summaries = getTopicSummaries();
-  const totalSize = getTotalBankSize();
-  console.log(`[topics] Bank has ${totalSize} questions, ${summaries.length} topics`);
-  console.log("[topics] Topics:", summaries.map(s => `${s.topicId}(${s.count})`).join(", ") || "(none)");
 
   // Enrich with display metadata
   const topics = summaries.map((summary) => {

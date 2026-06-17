@@ -207,7 +207,7 @@ test("SSE broker partitions room events and preserves room-local state payloads"
   assert.equal(alphaWrites.length, 1);
   assert.equal(betaWrites.length, 0);
 
-  broadcast({ ignored: true });
+  broadcast();
   assert.equal(alphaWrites.length, 2);
   assert.equal(betaWrites.length, 1);
   assert.match(alphaWrites[1]!, /"roomId":"alpha-events"/);
