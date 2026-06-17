@@ -25,6 +25,7 @@ import {
   restorePersistedState,
 } from "./state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
+import { stopRateLimitCleanup } from "./routes/register";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -101,6 +102,8 @@ async function main() {
 
     shuttingDown = true;
     console.log(`[Shutdown] Received ${signal}; flushing runtime state...`);
+
+    stopRateLimitCleanup();
 
     try {
       await flushPersistence();
