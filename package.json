@@ -4,10 +4,10 @@
   "description": "Backend engine for Apologia Sancta Live quiz",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node scripts/with-local-temp.cjs tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/backend.verification.test.ts"
+    "test": "node scripts/with-local-temp.cjs node --import tsx --test src/backend.verification.test.ts"
   },
   "keywords": [],
   "author": "",
