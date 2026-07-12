@@ -18,6 +18,7 @@ import registerRouter from "./routes/register";
 import topicsRouter from "./routes/topics";
 import roomsRouter from "./routes/rooms";
 import leaderboardRouter from "./routes/leaderboard";
+import { releasesRouter, adminReleasesRouter } from "./routes/releases";
 import { getStatus } from "./engine/roundController";
 
 /**
@@ -116,7 +117,9 @@ export function createApp(): express.Application {
   app.use("/rooms", roomsRouter);
   app.use("/leaderboard", leaderboardRouter);
   app.use("/topics", topicsRouter); // Public content browsing
+  app.use("/releases", releasesRouter); // Public release archive
   app.use("/admin", adminRouter);
+  app.use("/admin/releases", adminReleasesRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
   app.use("/admin", contentAdminRouter); // Content management routes
 
@@ -135,7 +138,9 @@ export function createApp(): express.Application {
         rooms: "GET /rooms - List rooms, GET /rooms/:roomId - Room summary",
         leaderboard: "GET /leaderboard?period=all-time|daily|weekly - Global leaderboard, GET /rooms/:roomId/leaderboard - Room leaderboard",
         topics: "GET /topics - List topics with counts, GET /topics/:id - Topic details (public)",
+        releases: "GET /releases - Public release archive, GET /releases/latest - Latest release",
         admin: "POST /admin/start|resume|pause|next|reset|persistence/save - Admin controls (requires x-admin-token)",
+        adminReleases: "GET|POST /admin/releases, PATCH /admin/releases/:id/read (requires x-admin-token)",
         youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
         content: "POST /admin/content/* - Content management (requires x-admin-token)",
         quizSet: "POST /admin/quiz/set - Set active quiz pool (requires x-admin-token)",
