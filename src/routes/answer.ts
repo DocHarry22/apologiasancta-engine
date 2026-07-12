@@ -3,7 +3,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import { getCurrentPhase, getQuestionIndex } from "../engine/roundController";
+import { getAnswerWindowStatus } from "../engine/roundController";
 import { submitAnswer, submitAnswerForRegistered, isRegistered, initializePlayerRoom } from "../state/players";
 import { DEFAULT_ROOM_ID, isGameplayRoomSupported, isPlayerInRoom, joinRoom, requireRoom } from "../state/rooms";
 
@@ -72,18 +72,24 @@ function handleAnswer(req: Request, res: Response, roomId: string): void {
     return;
   }
 
-  // Check if we're in OPEN phase
-  const phase = getCurrentPhase(roomId);
-  if (phase !== "OPEN") {
+  const answerWindow = getAnswerWindowStatus(roomId);
+  if (!answerWindow.accepting) {
     res.status(409).json({
       ok: false,
-      error: `Answers not accepted during ${phase} phase`,
-      phase,
+      accepted: false,
+      error: answerWindow.reason === "too_late"
+        ? "Answer deadline has passed"
+        : answerWindow.reason === "game_paused"
+          ? "Quiz is paused"
+          : "Answers are locked",
+      reason: answerWindow.reason,
+      phase: answerWindow.phase,
+      endsAtMs: answerWindow.endsAtMs,
     });
     return;
   }
 
-  const questionIndex = getQuestionIndex(roomId);
+  const questionIndex = answerWindow.questionIndex;
   const normalizedChoiceId = choiceId.toLowerCase();
 
   // Handle YouTube vs Mobile answers differently

@@ -593,6 +593,55 @@ function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
 
 // ============== Public API ==============
 
+export type AnswerWindowReason = "game_paused" | "not_started" | "locked" | "too_late";
+
+export type AnswerWindowStatus = {
+  accepting: boolean;
+  reason?: AnswerWindowReason;
+  phase: QuizPhase;
+  questionIndex: number;
+  openStartMs: number;
+  endsAtMs: number;
+};
+
+/**
+ * Authoritative server-side answer window check.
+ *
+ * The phase timer callback can be delayed when the event loop is busy, so
+ * checking phase alone is not sufficient. This function also rejects paused,
+ * unstarted, early, and deadline-expired submissions using server time.
+ */
+export function getAnswerWindowStatus(
+  roomId: string = DEFAULT_ROOM_ID,
+  nowMs: number = Date.now()
+): AnswerWindowStatus {
+  const state = getControllerState(roomId);
+  const snapshot = {
+    phase: state.phase,
+    questionIndex: state.questionIndex,
+    openStartMs: state.openStartMs,
+    endsAtMs: state.endsAtMs,
+  };
+
+  if (!state.running) {
+    return { ...snapshot, accepting: false, reason: "game_paused" };
+  }
+
+  if (state.phase !== "OPEN") {
+    return { ...snapshot, accepting: false, reason: "locked" };
+  }
+
+  if (state.openStartMs <= 0 || state.endsAtMs <= state.openStartMs || nowMs < state.openStartMs) {
+    return { ...snapshot, accepting: false, reason: "not_started" };
+  }
+
+  if (nowMs >= state.endsAtMs) {
+    return { ...snapshot, accepting: false, reason: "too_late" };
+  }
+
+  return { ...snapshot, accepting: true };
+}
+
 /**
  * Get current quiz state (for /state endpoint)
  */
