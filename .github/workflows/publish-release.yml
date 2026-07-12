@@ -1,0 +1,42 @@
+name: Publish release notification
+
+on:
+  workflow_run:
+    workflows: ["Engine CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    env:
+      ENGINE_URL: ${{ vars.RELEASE_ENGINE_URL || 'https://apologiasancta-engine.onrender.com' }}
+      ADMIN_TOKEN: ${{ secrets.ENGINE_ADMIN_TOKEN }}
+      COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+      REPOSITORY_NAME: apologiasancta-engine
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+      COMMIT_URL: https://github.com/${{ github.repository }}/commit/${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Require notification credentials
+        run: test -n "$ADMIN_TOKEN"
+
+      - name: Publish idempotent release record
+        run: |
+          payload="$(jq -n \
+            --arg commitSha "$COMMIT_SHA" \
+            --arg repository "$REPOSITORY_NAME" \
+            --arg category "Automated release" \
+            --arg title "apologiasancta-engine update" \
+            --arg summary "A tested update was merged to the main branch and is ready for deployment." \
+            --arg runUrl "$RUN_URL" \
+            --arg commitUrl "$COMMIT_URL" \
+            '{commitSha:$commitSha,repository:$repository,category:$category,title:$title,summary:$summary,changes:["Main branch updated"],tests:["Repository CI passed"],deploymentStatus:"pending",links:{workflow:$runUrl,commit:$commitUrl}}')"
+          curl --fail-with-body --retry 3 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-admin-token: $ADMIN_TOKEN" \
+            --data "$payload" \
+            "$ENGINE_URL/admin/releases"
