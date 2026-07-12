@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { access, mkdir, rm } from "node:fs/promises";
 import { ingestQuestions } from "./content/bank";
 import { start, pause, skipToNext, startNextTopic, getStatus, getAnswerWindowStatus } from "./engine/roundController";
 import {
@@ -319,7 +320,53 @@ test("sqlite persistence restore keeps room scores and checkpoint while resuming
     assert.equal(restoredStatus.questionIndex, 1);
     assert.equal(restoredStatus.endsAtMs, 0);
   } finally {
+    await resetPersistenceState();
     await temp.cleanup();
+  }
+});
+
+test("persistence cleanup drains writes and a failed flush does not poison later saves", async () => {
+  const first = await createTempStateFilePath();
+  const second = await createTempStateFilePath();
+
+  try {
+    configurePersistenceForTests(first.filePath);
+    createRoom("Queued Persistence", "queued-persist");
+
+    // A directory at the configured file path makes the atomic rename fail.
+    await mkdir(first.filePath);
+    const originalConsoleError = console.error;
+    const persistenceErrors: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      persistenceErrors.push(args);
+    };
+    try {
+      await assert.rejects(async () => {
+        const { flushPersistence } = await import("./state/persistence");
+        await flushPersistence();
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+    assert.equal(persistenceErrors.length, 1);
+    await rm(first.filePath, { recursive: true, force: true });
+
+    // The next configuration must still save successfully after that rejection.
+    configurePersistenceForTests(second.filePath);
+    createRoom("Recovered Persistence", "recovered-persist");
+    const { flushPersistence } = await import("./state/persistence");
+    assert.equal(await flushPersistence(), true);
+    await access(second.filePath);
+
+    // Cleanup disables scheduled writes and closes resources before paths vanish.
+    await resetPersistenceState();
+    await second.cleanup();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await assert.rejects(access(second.filePath));
+  } finally {
+    await resetPersistenceState();
+    await first.cleanup();
+    await second.cleanup();
   }
 });
 

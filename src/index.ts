@@ -19,10 +19,10 @@ import { getScoringMode } from "./engine/scoring";
 import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot } from "./state/players";
 import {
   configureStatePersistence,
-  flushPersistence,
   getPersistenceStatus,
   getStatePersistencePath,
   restorePersistedState,
+  shutdownPersistence,
 } from "./state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
 import { stopRateLimitCleanup } from "./routes/register";
@@ -106,7 +106,7 @@ async function main() {
     stopRateLimitCleanup();
 
     try {
-      await flushPersistence();
+      await shutdownPersistence();
       console.log("[Shutdown] Runtime state flushed");
     } catch (error) {
       console.error("[Shutdown] Failed to flush runtime state:", error);
