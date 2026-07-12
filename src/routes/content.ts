@@ -48,6 +48,7 @@ const router = Router();
  *   questions: UIQuestion[] - Array of validated questions
  *   commitToGitHub?: boolean - Whether to persist to GitHub (default: false)
  *   commitMessage?: string - Custom commit message
+ *   refreshActivePool?: boolean - Whether to rebuild the active quiz pool (default: true)
  *
  * Response:
  *   added: number - Questions newly added
@@ -64,6 +65,7 @@ router.post(
         questions = [],
         commitToGitHub = false,
         commitMessage = "Add quiz questions via engine",
+        refreshActivePool = true,
       } = req.body;
 
       if (!Array.isArray(questions) || questions.length === 0) {
@@ -84,11 +86,8 @@ router.post(
         });
       }
 
-      // Ingest valid questions into the bank
-      const result = ingestQuestions(valid);
-      const activePoolSize = setActivePool([], true);
-
-      // Optionally commit to GitHub
+      // Commit first so a GitHub failure cannot leave the runtime bank changed
+      // while reporting the overall import as failed.
       let committed = false;
       let commitTarget:
         | {
@@ -103,9 +102,8 @@ router.post(
         if (!config) {
           return res.status(500).json({
             error: "GitHub not configured. Set GITHUB_OWNER, GITHUB_REPO, and GITHUB_TOKEN.",
-            added: result.added,
-            updated: result.updated,
             committed: false,
+            bankChanged: false,
           });
         }
 
@@ -122,12 +120,17 @@ router.post(
           console.error("GitHub commit failed:", err);
           return res.status(500).json({
             error: `GitHub commit failed: ${(err as Error).message}`,
-            added: result.added,
-            updated: result.updated,
             committed: false,
+            bankChanged: false,
           });
         }
       }
+
+      // Ingest only after all requested durable writes have succeeded.
+      const result = ingestQuestions(valid);
+      const activePoolSize = refreshActivePool === false
+        ? getActivePoolSize()
+        : setActivePool([], true);
 
       return res.json({
         added: result.added,
@@ -137,6 +140,7 @@ router.post(
         commitTarget,
         bankSize: getTotalBankSize(),
         activePoolSize,
+        activePoolRefreshed: refreshActivePool !== false,
       });
     } catch (error) {
       console.error("Content import error:", error);
