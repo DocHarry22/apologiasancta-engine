@@ -1,5 +1,5 @@
 import { dirname, resolve } from "path";
-import { access, mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, rename, rm, writeFile } from "fs/promises";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 export interface PersistedEnginePayload {
@@ -41,6 +41,7 @@ const SQLITE_TABLE_NAME = "runtime_state_snapshots";
 let persistenceConfig: PersistenceConfig | null = null;
 let saveTimer: NodeJS.Timeout | null = null;
 let writeChain: Promise<void> = Promise.resolve();
+let writesInFlight = 0;
 let isHydrating = false;
 let lastSavedAt: number | null = null;
 let lastRestoredAt: number | null = null;
@@ -127,6 +128,10 @@ async function getSqliteDatabase(filePath: string): Promise<DatabaseSyncType> {
   const { DatabaseSync } = await import("node:sqlite");
   const database = new DatabaseSync(filePath);
   database.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA busy_timeout = 5000;
+
     CREATE TABLE IF NOT EXISTS ${SQLITE_TABLE_NAME} (
       slot INTEGER PRIMARY KEY CHECK (slot = 1),
       version INTEGER NOT NULL,
@@ -154,7 +159,7 @@ export function getPersistenceStatus(): PersistenceStatus {
     driver,
     configured: persistenceConfig !== null,
     path: getResolvedPersistencePath(driver),
-    savePending: saveTimer !== null,
+    savePending: saveTimer !== null || writesInFlight > 0,
     lastSavedAt,
     lastRestoredAt,
     lastRestoreSucceeded,
@@ -172,12 +177,23 @@ export function schedulePersistence(): void {
 
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    writeChain = writeChain
-      .then(() => persistNow())
-      .catch((error) => {
-        console.error("[Persistence] Failed to save runtime state:", error);
-      });
+    void enqueuePersistenceWrite().catch((error) => {
+      console.error("[Persistence] Failed to save runtime state:", error);
+    });
   }, SAVE_DEBOUNCE_MS);
+}
+
+function enqueuePersistenceWrite(): Promise<void> {
+  writesInFlight += 1;
+  const operation = writeChain.then(() => persistNow());
+
+  // Keep the shared queue usable after a failed operation. Callers still receive
+  // the original rejection and can report or retry it.
+  writeChain = operation.catch(() => undefined);
+  void operation.finally(() => {
+    writesInFlight -= 1;
+  }).catch(() => undefined);
+  return operation;
 }
 
 async function persistNow(): Promise<void> {
@@ -214,7 +230,14 @@ async function persistNow(): Promise<void> {
       });
   } else {
     await mkdir(dirname(persistencePath), { recursive: true });
-    await writeFile(persistencePath, JSON.stringify(snapshot, null, 2), "utf8");
+    const temporaryPath = `${persistencePath}.${process.pid}.${snapshot.savedAt}.tmp`;
+    try {
+      await writeFile(temporaryPath, JSON.stringify(snapshot, null, 2), "utf8");
+      await rename(temporaryPath, persistencePath);
+    } catch (error) {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   lastSavedAt = snapshot.savedAt;
@@ -230,15 +253,32 @@ export async function flushPersistence(): Promise<boolean> {
     saveTimer = null;
   }
 
-  writeChain = writeChain
-    .then(() => persistNow())
-    .catch((error) => {
-      console.error("[Persistence] Failed to flush runtime state:", error);
-      throw error;
-    });
-
-  await writeChain;
+  try {
+    await enqueuePersistenceWrite();
+  } catch (error) {
+    console.error("[Persistence] Failed to flush runtime state:", error);
+    throw error;
+  }
   return true;
+}
+
+export async function shutdownPersistence(options: { flush?: boolean } = {}): Promise<boolean> {
+  const configured = persistenceConfig !== null;
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+
+  if (configured && options.flush !== false) {
+    await flushPersistence();
+  }
+
+  // Disable new writes before draining anything already queued, then close the
+  // database only after no operation can still be using it.
+  persistenceConfig = null;
+  await writeChain;
+  closeSqliteDatabase();
+  return configured;
 }
 
 export async function restorePersistedState(): Promise<boolean> {
@@ -336,14 +376,10 @@ export function setStatePersistenceDriverForTests(driver: PersistenceDriver | nu
   persistenceDriverOverride = driver;
 }
 
-export function resetPersistenceForTests(): void {
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-
-  persistenceConfig = null;
+export async function resetPersistenceForTests(): Promise<void> {
+  await shutdownPersistence({ flush: false });
   writeChain = Promise.resolve();
+  writesInFlight = 0;
   isHydrating = false;
   lastSavedAt = null;
   lastRestoredAt = null;
@@ -351,5 +387,4 @@ export function resetPersistenceForTests(): void {
   stateFilePathOverride = null;
   stateDbPathOverride = null;
   persistenceDriverOverride = null;
-  closeSqliteDatabase();
 }
