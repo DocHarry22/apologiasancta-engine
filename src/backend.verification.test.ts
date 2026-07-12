@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { access, mkdir, rm } from "node:fs/promises";
-import { ingestQuestions } from "./content/bank";
+import { getActivePoolSize, getTotalBankSize, ingestQuestions } from "./content/bank";
 import { start, pause, skipToNext, startNextTopic, getStatus, getAnswerWindowStatus } from "./engine/roundController";
 import {
   evaluateAnswers,
@@ -187,6 +187,63 @@ test("admin and health endpoints expose persistence state and closed rooms block
     assert.equal(health.persistence.path.endsWith("runtime-state.json"), true);
     assert.equal(typeof health.persistence.lastSavedAt, "number");
     assert.equal(health.roomDetails.some((room) => room.roomId === "alpha-room" && room.isActive === false), true);
+  } finally {
+    await server.close();
+    await temp.cleanup();
+  }
+});
+
+test("content publishing can preserve the live pool while adding validated questions", async () => {
+  const temp = await createTempStateFilePath();
+  configurePersistenceForTests(temp.filePath);
+  const server = await startTestServer();
+
+  try {
+    const initialImport = await fetch(`${server.baseUrl}/admin/content/import`, {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({
+        questions: [
+          buildQuestion("publish_0001", "publish-topic", "Initial question one"),
+          buildQuestion("publish_0002", "publish-topic", "Initial question two"),
+        ],
+      }),
+    });
+    assert.equal(initialImport.status, 200);
+    assert.equal(getActivePoolSize(), 2);
+
+    const safePublish = await fetch(`${server.baseUrl}/admin/content/import`, {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({
+        questions: [buildQuestion("publish_0003", "publish-topic", "Published during a live round")],
+        refreshActivePool: false,
+      }),
+    });
+    assert.equal(safePublish.status, 200);
+    const safePayload = await safePublish.json() as {
+      added: number;
+      bankSize: number;
+      activePoolSize: number;
+      activePoolRefreshed: boolean;
+    };
+    assert.equal(safePayload.added, 1);
+    assert.equal(safePayload.bankSize, 3);
+    assert.equal(safePayload.activePoolSize, 2);
+    assert.equal(safePayload.activePoolRefreshed, false);
+    assert.equal(getTotalBankSize(), 3);
+    assert.equal(getActivePoolSize(), 2);
+
+    const explicitRefresh = await fetch(`${server.baseUrl}/admin/content/import`, {
+      method: "POST",
+      headers: ADMIN_HEADERS,
+      body: JSON.stringify({
+        questions: [buildQuestion("publish_0004", "publish-topic", "Refresh the pool")],
+        refreshActivePool: true,
+      }),
+    });
+    assert.equal(explicitRefresh.status, 200);
+    assert.equal(getActivePoolSize(), 4);
   } finally {
     await server.close();
     await temp.cleanup();
