@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { getRoom, isPlayerInRoom, joinRoom, leaveRoom, listRooms } from "../state/rooms";
 import { getStateForRoom } from "../state/store";
-import { getCurrentPhase, getQuestionIndex } from "../engine/roundController";
+import { getAnswerWindowStatus } from "../engine/roundController";
 import { getLeaderboardForPeriod, initializePlayerRoom, registerPlayer, submitAnswer, submitAnswerForRegistered, isRegistered } from "../state/players";
 import { addClient, removeClient } from "../sse/broker";
 import { isGameplayRoomSupported } from "../state/rooms";
@@ -199,16 +199,23 @@ router.post("/:roomId/answer", (req: Request<{ roomId: string }>, res: Response)
     });
   }
 
-  const phase = getCurrentPhase(room.roomId);
-  if (phase !== "OPEN") {
+  const answerWindow = getAnswerWindowStatus(room.roomId);
+  if (!answerWindow.accepting) {
     return res.status(409).json({
       ok: false,
-      error: `Answers not accepted during ${phase} phase`,
-      phase,
+      accepted: false,
+      error: answerWindow.reason === "too_late"
+        ? "Answer deadline has passed"
+        : answerWindow.reason === "game_paused"
+          ? "Quiz is paused"
+          : "Answers are locked",
+      reason: answerWindow.reason,
+      phase: answerWindow.phase,
+      endsAtMs: answerWindow.endsAtMs,
     });
   }
 
-  const questionIndex = getQuestionIndex(room.roomId);
+  const questionIndex = answerWindow.questionIndex;
   if (userId.startsWith("yt:")) {
     const displayName = name || username || "YouTuber";
     initializePlayerRoom(userId, room.roomId);
