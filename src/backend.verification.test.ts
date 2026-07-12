@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ingestQuestions } from "./content/bank";
-import { start, pause, skipToNext, startNextTopic, getStatus } from "./engine/roundController";
+import { start, pause, skipToNext, startNextTopic, getStatus, getAnswerWindowStatus } from "./engine/roundController";
 import {
   evaluateAnswers,
   getLeaderboardForPeriod,
@@ -320,5 +320,54 @@ test("sqlite persistence restore keeps room scores and checkpoint while resuming
     assert.equal(restoredStatus.endsAtMs, 0);
   } finally {
     await temp.cleanup();
+  }
+});
+
+test("answer window rejects paused, early, and expired submissions using server time", () => {
+  const paused = getAnswerWindowStatus();
+  assert.equal(paused.accepting, false);
+  assert.equal(paused.reason, "game_paused");
+
+  start();
+  const running = getAnswerWindowStatus();
+  assert.equal(running.accepting, true);
+  assert.equal(running.phase, "OPEN");
+
+  const early = getAnswerWindowStatus("global", running.openStartMs - 1);
+  assert.equal(early.accepting, false);
+  assert.equal(early.reason, "not_started");
+
+  const boundary = getAnswerWindowStatus("global", running.endsAtMs);
+  assert.equal(boundary.accepting, false);
+  assert.equal(boundary.reason, "too_late");
+
+  pause();
+  const pausedAgain = getAnswerWindowStatus();
+  assert.equal(pausedAgain.accepting, false);
+  assert.equal(pausedAgain.reason, "game_paused");
+});
+
+test("answer API refuses submissions before the controller starts", async () => {
+  const server = await startTestServer();
+  try {
+    const registration = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "WindowTester" }),
+    });
+    assert.equal(registration.status, 200);
+    const player = await registration.json() as { userId: string };
+
+    const answer = await fetch(`${server.baseUrl}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: player.userId, choiceId: "a" }),
+    });
+    assert.equal(answer.status, 409);
+    const payload = await answer.json() as { accepted: boolean; reason: string };
+    assert.equal(payload.accepted, false);
+    assert.equal(payload.reason, "game_paused");
+  } finally {
+    await server.close();
   }
 });
