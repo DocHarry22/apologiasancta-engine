@@ -381,6 +381,27 @@ test("postgres persistence migrates, upserts, restores, and closes its connectio
   assert.equal(poolClosures, 1);
 });
 
+test("production managed database overrides a stale SQLite driver setting", () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  const previousDriver = process.env.STATE_PERSISTENCE_DRIVER;
+
+  process.env.NODE_ENV = "production";
+  process.env.DATABASE_URL = "postgresql://managed-database/apologia";
+  process.env.STATE_PERSISTENCE_DRIVER = "sqlite";
+  try {
+    assert.equal(getPersistenceStatus().driver, "postgres");
+    assert.equal(getPersistenceStatus().path, "postgresql:runtime_state_snapshots");
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+    if (previousDriver === undefined) delete process.env.STATE_PERSISTENCE_DRIVER;
+    else process.env.STATE_PERSISTENCE_DRIVER = previousDriver;
+  }
+});
+
 test("persistence cleanup drains writes and a failed flush does not poison later saves", async () => {
   const first = await createTempStateFilePath();
   const second = await createTempStateFilePath();

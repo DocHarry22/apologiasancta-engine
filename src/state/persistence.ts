@@ -73,6 +73,13 @@ function getResolvedPersistenceDriver(): PersistenceDriver {
     return persistenceDriverOverride;
   }
 
+  // Render can retain legacy Blueprint values on an existing service. A managed
+  // database must take precedence in production so an old SQLite setting cannot
+  // silently move durable state back onto the ephemeral deploy filesystem.
+  if (process.env.NODE_ENV === "production" && process.env.DATABASE_URL) {
+    return "postgres";
+  }
+
   const configuredDriver = parsePersistenceDriver(process.env.STATE_PERSISTENCE_DRIVER);
   if (configuredDriver) {
     return configuredDriver;
