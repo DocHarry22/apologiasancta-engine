@@ -26,9 +26,7 @@ services:
           name: apologiasancta-redis
           property: connectionString
       - key: STATE_PERSISTENCE_DRIVER
-        value: sqlite
-      - key: STATE_DB_PATH
-        value: /var/data/runtime-state.sqlite
+        value: postgres
       - key: YOUTUBE_API_KEY
         sync: false
       - key: YOUTUBE_VIDEO_ID

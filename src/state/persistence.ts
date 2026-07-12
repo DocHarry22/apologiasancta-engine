@@ -10,7 +10,14 @@ export interface PersistedEnginePayload {
   players: unknown;
 }
 
-export type PersistenceDriver = "file" | "sqlite";
+export type PersistenceDriver = "file" | "sqlite" | "postgres";
+
+interface PostgresPoolLike {
+  query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
+  end: () => Promise<void>;
+}
+
+type PostgresPoolFactory = (connectionString: string) => Promise<PostgresPoolLike>;
 
 interface PersistedEngineState extends PersistedEnginePayload {
   version: 1;
@@ -34,6 +41,7 @@ export interface PersistenceStatus {
 
 let stateFilePathOverride: string | null = null;
 let stateDbPathOverride: string | null = null;
+let databaseUrlOverride: string | null = null;
 let persistenceDriverOverride: PersistenceDriver | null = null;
 const SAVE_DEBOUNCE_MS = 250;
 const SQLITE_TABLE_NAME = "runtime_state_snapshots";
@@ -48,9 +56,12 @@ let lastRestoredAt: number | null = null;
 let lastRestoreSucceeded = false;
 let sqliteDatabase: DatabaseSyncType | null = null;
 let sqliteDatabasePath: string | null = null;
+let postgresPool: PostgresPoolLike | null = null;
+let postgresSchemaReady = false;
+let postgresPoolFactoryOverride: PostgresPoolFactory | null = null;
 
 function parsePersistenceDriver(raw: string | undefined): PersistenceDriver | null {
-  if (raw === "file" || raw === "sqlite") {
+  if (raw === "file" || raw === "sqlite" || raw === "postgres") {
     return raw;
   }
 
@@ -67,6 +78,10 @@ function getResolvedPersistenceDriver(): PersistenceDriver {
     return configuredDriver;
   }
 
+  if (process.env.DATABASE_URL) {
+    return "postgres";
+  }
+
   if (process.env.STATE_DB_PATH) {
     return "sqlite";
   }
@@ -75,6 +90,10 @@ function getResolvedPersistenceDriver(): PersistenceDriver {
 }
 
 function getResolvedPersistencePath(driver = getResolvedPersistenceDriver()): string {
+  if (driver === "postgres") {
+    return "postgresql:runtime_state_snapshots";
+  }
+
   if (driver === "sqlite") {
     if (stateDbPathOverride) {
       return stateDbPathOverride;
@@ -96,6 +115,10 @@ function getResolvedPersistencePath(driver = getResolvedPersistenceDriver()): st
   }
 
   return resolve(process.cwd(), "data", "runtime-state.json");
+}
+
+function getResolvedDatabaseUrl(): string | null {
+  return databaseUrlOverride ?? process.env.DATABASE_URL ?? null;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -143,6 +166,65 @@ async function getSqliteDatabase(filePath: string): Promise<DatabaseSyncType> {
   sqliteDatabase = database;
   sqliteDatabasePath = filePath;
   return database;
+}
+
+async function closePostgresPool(): Promise<void> {
+  const pool = postgresPool;
+  postgresPool = null;
+  postgresSchemaReady = false;
+  if (pool) {
+    await pool.end();
+  }
+}
+
+async function getPostgresPool(): Promise<PostgresPoolLike> {
+  if (postgresPool) {
+    return postgresPool;
+  }
+
+  const connectionString = getResolvedDatabaseUrl();
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is required when STATE_PERSISTENCE_DRIVER=postgres");
+  }
+
+  if (postgresPoolFactoryOverride) {
+    postgresPool = await postgresPoolFactoryOverride(connectionString);
+  } else {
+    const { Pool } = await import("pg");
+    const pool = new Pool({
+      connectionString,
+      max: 4,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+      application_name: "apologiasancta-engine",
+    });
+    postgresPool = {
+      query: async (text, values) => {
+        const result = await pool.query(text, values);
+        return { rows: result.rows as Array<Record<string, unknown>> };
+      },
+      end: () => pool.end(),
+    };
+  }
+
+  return postgresPool;
+}
+
+async function ensurePostgresSchema(pool: PostgresPoolLike): Promise<void> {
+  if (postgresSchemaReady) {
+    return;
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS runtime_state_snapshots (
+      slot SMALLINT PRIMARY KEY CHECK (slot = 1),
+      version INTEGER NOT NULL,
+      saved_at BIGINT NOT NULL,
+      payload JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  postgresSchemaReady = true;
 }
 
 export function configureStatePersistence(config: PersistenceConfig): void {
@@ -210,7 +292,22 @@ async function persistNow(config = persistenceConfig): Promise<void> {
 
   const persistencePath = getResolvedPersistencePath(driver);
 
-  if (driver === "sqlite") {
+  if (driver === "postgres") {
+    const pool = await getPostgresPool();
+    await ensurePostgresSchema(pool);
+    await pool.query(
+      `
+        INSERT INTO runtime_state_snapshots (slot, version, saved_at, payload, updated_at)
+        VALUES (1, $1, $2, $3::jsonb, NOW())
+        ON CONFLICT(slot) DO UPDATE SET
+          version = EXCLUDED.version,
+          saved_at = EXCLUDED.saved_at,
+          payload = EXCLUDED.payload,
+          updated_at = NOW()
+      `,
+      [snapshot.version, snapshot.savedAt, JSON.stringify(snapshot)]
+    );
+  } else if (driver === "sqlite") {
     const database = await getSqliteDatabase(persistencePath);
     database
       .prepare(
@@ -285,6 +382,7 @@ export async function shutdownPersistence(options: { flush?: boolean } = {}): Pr
   // Close the database only after no operation can still be using it.
   await writeChain;
   closeSqliteDatabase();
+  await closePostgresPool();
   return configured;
 }
 
@@ -296,9 +394,24 @@ export async function restorePersistedState(): Promise<boolean> {
 
   const driver = getResolvedPersistenceDriver();
   const persistencePath = getResolvedPersistencePath(driver);
-  let raw: string;
+  let persistedValue: unknown;
 
-  if (driver === "sqlite") {
+  if (driver === "postgres") {
+    try {
+      const pool = await getPostgresPool();
+      await ensurePostgresSchema(pool);
+      const row = (await pool.query("SELECT payload FROM runtime_state_snapshots WHERE slot = 1")).rows[0];
+      if (!row) {
+        lastRestoreSucceeded = false;
+        return false;
+      }
+      persistedValue = row.payload;
+    } catch (error) {
+      console.error("[Persistence] Failed to read runtime state database:", error);
+      lastRestoreSucceeded = false;
+      return false;
+    }
+  } else if (driver === "sqlite") {
     if (!(await pathExists(persistencePath))) {
       lastRestoreSucceeded = false;
       return false;
@@ -315,7 +428,7 @@ export async function restorePersistedState(): Promise<boolean> {
         return false;
       }
 
-      raw = row.payload_json;
+      persistedValue = row.payload_json;
     } catch (error) {
       console.error("[Persistence] Failed to read runtime state database:", error);
       lastRestoreSucceeded = false;
@@ -323,7 +436,7 @@ export async function restorePersistedState(): Promise<boolean> {
     }
   } else {
     try {
-      raw = await readFile(persistencePath, "utf8");
+      persistedValue = await readFile(persistencePath, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         lastRestoreSucceeded = false;
@@ -338,15 +451,34 @@ export async function restorePersistedState(): Promise<boolean> {
 
   let parsed: PersistedEngineState;
   try {
-    parsed = JSON.parse(raw) as PersistedEngineState;
+    parsed = (typeof persistedValue === "string" ? JSON.parse(persistedValue) : persistedValue) as PersistedEngineState;
   } catch (error) {
     console.error("[Persistence] Failed to parse runtime state:", error);
     lastRestoreSucceeded = false;
     return false;
   }
 
+  if (!parsed || typeof parsed !== "object") {
+    console.error("[Persistence] Runtime state payload is not an object");
+    lastRestoreSucceeded = false;
+    return false;
+  }
+
   if (parsed.version !== 1) {
     console.warn(`[Persistence] Unsupported runtime state version: ${String((parsed as { version?: unknown }).version)}`);
+    lastRestoreSucceeded = false;
+    return false;
+  }
+
+  if (!Number.isFinite(parsed.savedAt)) {
+    console.error("[Persistence] Runtime state has an invalid savedAt value");
+    lastRestoreSucceeded = false;
+    return false;
+  }
+
+  const requiredSections: Array<keyof PersistedEnginePayload> = ["content", "topicSequence", "controller", "rooms", "players"];
+  if (requiredSections.some((section) => !(section in parsed))) {
+    console.error("[Persistence] Runtime state is missing one or more required sections");
     lastRestoreSucceeded = false;
     return false;
   }
@@ -379,6 +511,14 @@ export function setStatePersistenceDbPathForTests(filePath: string | null): void
   stateDbPathOverride = filePath ? resolve(filePath) : null;
 }
 
+export function setStatePersistenceDatabaseUrlForTests(connectionString: string | null): void {
+  databaseUrlOverride = connectionString;
+}
+
+export function setPostgresPoolFactoryForTests(factory: PostgresPoolFactory | null): void {
+  postgresPoolFactoryOverride = factory;
+}
+
 export function setStatePersistenceDriverForTests(driver: PersistenceDriver | null): void {
   persistenceDriverOverride = driver;
 }
@@ -393,5 +533,7 @@ export async function resetPersistenceForTests(): Promise<void> {
   lastRestoreSucceeded = false;
   stateFilePathOverride = null;
   stateDbPathOverride = null;
+  databaseUrlOverride = null;
   persistenceDriverOverride = null;
+  postgresPoolFactoryOverride = null;
 }
