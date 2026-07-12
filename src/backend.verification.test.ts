@@ -13,6 +13,12 @@ import {
 } from "./state/players";
 import { createRoom, getRoom, joinRoom } from "./state/rooms";
 import {
+  flushPersistence,
+  getPersistenceStatus,
+  setPostgresPoolFactoryForTests,
+  setStatePersistenceDatabaseUrlForTests,
+} from "./state/persistence";
+import {
   configurePersistenceForTests,
   createTempStateDbPath,
   createTempStateFilePath,
@@ -323,6 +329,56 @@ test("sqlite persistence restore keeps room scores and checkpoint while resuming
     await resetPersistenceState();
     await temp.cleanup();
   }
+});
+
+test("postgres persistence migrates, upserts, restores, and closes its connection pool", async () => {
+  let storedPayload: Record<string, unknown> | null = null;
+  let schemaMigrations = 0;
+  let poolClosures = 0;
+  const queries: string[] = [];
+
+  setStatePersistenceDatabaseUrlForTests("postgresql://test:test@localhost/apologia_test");
+  setPostgresPoolFactoryForTests(async () => ({
+    query: async (sql, values) => {
+      queries.push(sql);
+      if (sql.includes("CREATE TABLE IF NOT EXISTS")) {
+        schemaMigrations += 1;
+      } else if (sql.includes("INSERT INTO runtime_state_snapshots")) {
+        storedPayload = JSON.parse(String(values?.[2])) as Record<string, unknown>;
+      } else if (sql.includes("SELECT payload")) {
+        return { rows: storedPayload ? [{ payload: storedPayload }] : [] };
+      }
+      return { rows: [] };
+    },
+    end: async () => {
+      poolClosures += 1;
+    },
+  }));
+  configurePersistenceForTests("", "postgres");
+
+  try {
+    createRoom("Postgres Persistence", "postgres-persist");
+    const alice = registerPlayer("Alice Postgres", "persist-alice-postgres");
+    assert.equal(alice.ok, true);
+    initializePlayerRoom(alice.userId!, "postgres-persist");
+    joinRoom("postgres-persist", alice.userId!);
+
+    assert.equal(await flushPersistence(), true);
+    assert.equal(schemaMigrations, 1);
+    assert.equal(queries.some((sql) => sql.includes("ON CONFLICT(slot) DO UPDATE")), true);
+    assert.equal(getPersistenceStatus().driver, "postgres");
+    assert.equal(getPersistenceStatus().path, "postgresql:runtime_state_snapshots");
+    assert.equal(getPersistenceStatus().path.includes("test:test"), false);
+
+    resetRuntimeState();
+    assert.equal(await restoreConfiguredPersistence(), true);
+    assert.equal(getRoom("postgres-persist")?.name, "Postgres Persistence");
+    assert.equal(schemaMigrations, 1);
+  } finally {
+    await resetPersistenceState();
+  }
+
+  assert.equal(poolClosures, 1);
 });
 
 test("persistence cleanup drains writes and a failed flush does not poison later saves", async () => {
