@@ -183,9 +183,9 @@ export function schedulePersistence(): void {
   }, SAVE_DEBOUNCE_MS);
 }
 
-function enqueuePersistenceWrite(): Promise<void> {
+function enqueuePersistenceWrite(config = persistenceConfig): Promise<void> {
   writesInFlight += 1;
-  const operation = writeChain.then(() => persistNow());
+  const operation = writeChain.then(() => persistNow(config));
 
   // Keep the shared queue usable after a failed operation. Callers still receive
   // the original rejection and can report or retry it.
@@ -196,8 +196,8 @@ function enqueuePersistenceWrite(): Promise<void> {
   return operation;
 }
 
-async function persistNow(): Promise<void> {
-  if (!persistenceConfig) {
+async function persistNow(config = persistenceConfig): Promise<void> {
+  if (!config) {
     return;
   }
 
@@ -205,7 +205,7 @@ async function persistNow(): Promise<void> {
   const snapshot: PersistedEngineState = {
     version: 1,
     savedAt: Date.now(),
-    ...persistenceConfig.getSnapshot(),
+    ...config.getSnapshot(),
   };
 
   const persistencePath = getResolvedPersistencePath(driver);
@@ -263,19 +263,26 @@ export async function flushPersistence(): Promise<boolean> {
 }
 
 export async function shutdownPersistence(options: { flush?: boolean } = {}): Promise<boolean> {
-  const configured = persistenceConfig !== null;
+  const finalConfig = persistenceConfig;
+  const configured = finalConfig !== null;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
 
-  if (configured && options.flush !== false) {
-    await flushPersistence();
+  // Disable new writes immediately, while retaining the current configuration
+  // for one final snapshot queued behind any write already in progress.
+  persistenceConfig = null;
+  if (finalConfig && options.flush !== false) {
+    try {
+      await enqueuePersistenceWrite(finalConfig);
+    } catch (error) {
+      console.error("[Persistence] Failed to flush runtime state:", error);
+      throw error;
+    }
   }
 
-  // Disable new writes before draining anything already queued, then close the
-  // database only after no operation can still be using it.
-  persistenceConfig = null;
+  // Close the database only after no operation can still be using it.
   await writeChain;
   closeSqliteDatabase();
   return configured;
