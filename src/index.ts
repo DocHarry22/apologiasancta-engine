@@ -19,7 +19,6 @@ import { getScoringMode } from "./engine/scoring";
 import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot } from "./state/players";
 import {
   configureStatePersistence,
-  flushPersistence,
   getPersistenceStatus,
   getStatePersistencePath,
   restorePersistedState,
