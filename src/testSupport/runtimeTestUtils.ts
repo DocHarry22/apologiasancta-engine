@@ -105,7 +105,7 @@ export async function resetPersistenceState(): Promise<void> {
   } catch {
     // Ignore flush failures during test cleanup.
   }
-  resetPersistenceForTests();
+  await resetPersistenceForTests();
 }
 
 export async function restoreConfiguredPersistence(): Promise<boolean> {
