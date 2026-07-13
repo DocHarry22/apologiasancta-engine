@@ -5,7 +5,10 @@ services:
     plan: free
     branch: main
     autoDeploy: true
-    buildCommand: npm ci && npm run build
+    # NODE_ENV=production makes npm omit devDependencies unless they are
+    # explicitly included. TypeScript and its type definitions are build-time
+    # dependencies, so Render must install them before running `tsc`.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
