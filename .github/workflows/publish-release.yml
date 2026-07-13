@@ -20,10 +20,15 @@ jobs:
       RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
       COMMIT_URL: https://github.com/${{ github.repository }}/commit/${{ github.event.workflow_run.head_sha }}
     steps:
-      - name: Require notification credentials
-        run: test -n "$ADMIN_TOKEN"
+      - name: Skip release publishing when credentials are absent
+        if: env.ADMIN_TOKEN == ''
+        run: |
+          echo "Release publishing skipped: ENGINE_ADMIN_TOKEN is not configured."
+          echo "### Release publishing skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "The tested deployment remains valid; configure ENGINE_ADMIN_TOKEN to enable the in-app release archive." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish idempotent release record
+        if: env.ADMIN_TOKEN != ''
         run: |
           payload="$(jq -n \
             --arg commitSha "$COMMIT_SHA" \
