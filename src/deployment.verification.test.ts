@@ -16,6 +16,8 @@ test("Render installs build tooling and uses managed PostgreSQL", async () => {
 
 test("GitHub CI mirrors the production dependency install", async () => {
   const workflow = await readFile(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+  const npmConfiguration = await readFile(resolve(repositoryRoot, ".npmrc"), "utf8");
 
   assert.match(workflow, /run:\s*npm ci --include=dev/);
+  assert.match(npmConfiguration, /^include=dev$/m);
 });
