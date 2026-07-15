@@ -4,6 +4,12 @@ Backend runtime for Apologia Sancta Live, a room-aware theology battle trivia pl
 
 Deployed on Render: `https://apologiasancta-engine.onrender.com`
 
+## Operational security update (July 2026)
+
+The production blueprint now uses PostgreSQL atomic runtime snapshots and no longer provisions an unused Redis service. Player registration issues an HMAC-signed, expiring room token; join, leave, rename and answer routes enforce that identity, while expired signed sessions may be refreshed by rejoining. Production also has strict origin resolution, request/player rate limits, request IDs, bounded bodies and a non-secret `/diagnostics` readiness endpoint.
+
+`ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Configure the latter on Render before deploying this branch. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
+
 ## Current State (v1 — May 2026)
 
 The engine is live on Render and serving production traffic. All core game mechanics are operational.
@@ -90,10 +96,14 @@ Create a `.env` file:
 PORT=4000
 
 # CORS
-ALLOWED_ORIGIN=http://localhost:3000,https://your-domain.com
+CORS_ORIGINS=http://localhost:3000,https://your-domain.com
+ALLOW_LOCAL_ORIGINS=false
 
 # Admin
 ADMIN_TOKEN=your-secure-admin-token
+
+# Public player room sessions (use a different high-entropy value)
+PLAYER_JOIN_SECRET=your-secure-player-join-secret
 
 # YouTube integration (optional)
 YOUTUBE_API_KEY=AIza...your_key
@@ -104,7 +114,7 @@ OPEN_SECONDS=25
 LOCK_SECONDS=2
 REVEAL_SECONDS=12
 
-# Runtime persistence (optional but recommended)
+# Runtime persistence (PostgreSQL is recommended in production)
 # Default file-backed snapshot storage
 STATE_FILE_PATH=./data/runtime-state.json
 
@@ -112,6 +122,10 @@ STATE_FILE_PATH=./data/runtime-state.json
 # If STATE_DB_PATH is set, sqlite mode is selected automatically unless overridden.
 STATE_PERSISTENCE_DRIVER=sqlite
 STATE_DB_PATH=./data/runtime-state.sqlite
+
+# Managed PostgreSQL snapshot persistence
+STATE_PERSISTENCE_DRIVER=postgres
+DATABASE_URL=postgresql://...
 ```
 
 ### Running
@@ -135,6 +149,7 @@ npm start
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Service health, room counts, and persistence status |
+| `/diagnostics` | GET | Non-secret deployment readiness and version metadata |
 | `/state` | GET | Shared live state |
 | `/state/:roomId` | GET | Room-scoped live state |
 | `/events` | GET | Shared SSE stream |
@@ -231,6 +246,7 @@ On restart, the engine restores the current checkpoint in paused mode. It does n
 
 - `file` stores the runtime snapshot as formatted JSON at `STATE_FILE_PATH`
 - `sqlite` stores the same runtime snapshot atomically in a local SQLite database at `STATE_DB_PATH`
+- `postgres` stores the snapshot atomically in `runtime_state_snapshots` using `DATABASE_URL`
 
 If `STATE_PERSISTENCE_DRIVER` is unset and `STATE_DB_PATH` is present, the engine automatically uses the SQLite driver.
 

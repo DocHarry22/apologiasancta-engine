@@ -33,12 +33,11 @@ const OPEN_SECONDS = process.env.OPEN_SECONDS || "25";
 const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
 
-// Warn loudly if the default admin token is used in production
-if (process.env.NODE_ENV === "production" && !process.env.ADMIN_TOKEN) {
-  console.error(
-    "[Security] CRITICAL: ADMIN_TOKEN is not set. " +
-    "The default 'dev-admin-token' is in use — set a strong ADMIN_TOKEN before going live."
-  );
+if (process.env.NODE_ENV === "production") {
+  const missing = ["ADMIN_TOKEN", "PLAYER_JOIN_SECRET"].filter((name) => !process.env[name]?.trim());
+  if (missing.length > 0) {
+    throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
+  }
 }
 
 let server: Server | null = null;

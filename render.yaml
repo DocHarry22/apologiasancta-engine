@@ -18,15 +18,15 @@ services:
         value: 10000
       - key: ADMIN_TOKEN
         sync: false
-      - key: ALLOWED_ORIGIN
+      - key: PLAYER_JOIN_SECRET
         sync: false
+      - key: CORS_ORIGINS
+        value: https://sandybrown-bear-488955.hostingersite.com
+      - key: ALLOW_LOCAL_ORIGINS
+        value: "false"
       - key: DATABASE_URL
         fromDatabase:
           name: apologiasancta-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromDatabase:
-          name: apologiasancta-redis
           property: connectionString
       - key: STATE_PERSISTENCE_DRIVER
         value: postgres
@@ -41,9 +41,4 @@ databases:
     user: apologiasancta
     plan: free
     postgresMajorVersion: "15"
-    ipAllowList: []
-
-  - name: apologiasancta-redis
-    plan: free
-    maxmemoryPolicy: allkeys-lru
     ipAllowList: []
