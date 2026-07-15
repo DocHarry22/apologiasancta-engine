@@ -1,74 +1,50 @@
-/**
- * POST /answer - Submit an answer
- */
-
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
 import { getAnswerWindowStatus } from "../engine/roundController";
-import { submitAnswer, submitAnswerForRegistered, isRegistered, initializePlayerRoom } from "../state/players";
-import { DEFAULT_ROOM_ID, isGameplayRoomSupported, isPlayerInRoom, joinRoom, requireRoom } from "../state/rooms";
+import { createRateLimit } from "../middleware/rateLimit";
+import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { initializePlayerRoom, isRegistered, submitAnswerForRegistered } from "../state/players";
+import { DEFAULT_ROOM_ID, isGameplayRoomSupported, isPlayerInRoom, requireRoom } from "../state/rooms";
 
 const router = Router();
+export const answerRateLimit = createRateLimit({
+  name: "ANSWER",
+  max: 90,
+  windowMs: 60_000,
+  message: "Too many answer requests. Wait for the next question.",
+  key: (req) => `${req.ip}:${typeof req.body?.userId === "string" ? req.body.userId : "unknown"}`,
+});
 
-interface AnswerBody {
-  userId: string;
-  name?: string;     // Optional: only needed for YouTube auto-registration
-  username?: string; // Preferred: for registered mobile users
-  choiceId: string;
-  roomId?: string;
-}
+type AnswerBody = { userId?: unknown; choiceId?: unknown; roomId?: unknown };
 
-function handleAnswer(req: Request, res: Response, roomId: string): void {
+export function processAnswer(req: Request, res: Response, roomId: string): void {
   try {
     requireRoom(roomId);
   } catch {
-    res.status(404).json({ ok: false, error: "Room not found" });
+    res.status(404).json({ ok: false, reason: "room_not_found", error: "Room not found" });
     return;
   }
-
   if (!isGameplayRoomSupported(roomId)) {
-    res.status(409).json({
-      ok: false,
-      error: "Room is closed",
-      roomId,
-    });
+    res.status(409).json({ ok: false, reason: "room_closed", error: "Room is closed", roomId });
     return;
   }
 
-  const { userId, name, username, choiceId } = req.body as AnswerBody;
-
-  // Validate required fields
-  if (!userId || !choiceId) {
-    res.status(400).json({
-      ok: false,
-      error: "Missing required fields: userId, choiceId",
-    });
+  const { userId, choiceId } = req.body as AnswerBody;
+  if (typeof userId !== "string" || !userId || userId.length > 200) {
+    res.status(400).json({ ok: false, reason: "invalid_user_id", error: "A valid userId is required" });
     return;
   }
-
-  // Validate field types and lengths to prevent oversized inputs
-  if (typeof userId !== "string" || userId.length > 200) {
-    res.status(400).json({
-      ok: false,
-      error: "Invalid userId: must be a string of at most 200 characters",
-    });
+  if (typeof choiceId !== "string" || !["a", "b", "c", "d"].includes(choiceId.toLowerCase())) {
+    res.status(400).json({ ok: false, reason: "invalid_choice", error: "choiceId must be a, b, c, or d" });
     return;
   }
-
-  if (typeof choiceId !== "string") {
-    res.status(400).json({
-      ok: false,
-      error: "Invalid choiceId: must be a string",
-    });
+  if (!isRegistered(userId)) {
+    res.status(401).json({ ok: false, reason: "not_registered", error: "Join the room before answering" });
     return;
   }
-
-  // Validate choiceId format
-  const validChoices = ["a", "b", "c", "d"];
-  if (!validChoices.includes(choiceId.toLowerCase())) {
-    res.status(400).json({
-      ok: false,
-      error: "Invalid choiceId. Must be a, b, c, or d",
-    });
+  const authorization = requirePlayerAuthorization(req, res, { userId, roomId });
+  if (!authorization) return;
+  if (!isPlayerInRoom(roomId, userId)) {
+    res.status(401).json({ ok: false, reason: "not_joined", error: "Rejoin this room before answering" });
     return;
   }
 
@@ -77,86 +53,32 @@ function handleAnswer(req: Request, res: Response, roomId: string): void {
     res.status(409).json({
       ok: false,
       accepted: false,
+      reason: answerWindow.reason,
       error: answerWindow.reason === "too_late"
         ? "Answer deadline has passed"
         : answerWindow.reason === "game_paused"
           ? "Quiz is paused"
           : "Answers are locked",
-      reason: answerWindow.reason,
       phase: answerWindow.phase,
       endsAtMs: answerWindow.endsAtMs,
     });
     return;
   }
 
-  const questionIndex = answerWindow.questionIndex;
-  const normalizedChoiceId = choiceId.toLowerCase();
-
-  // Handle YouTube vs Mobile answers differently
-  const isYouTubeUser = userId.startsWith("yt:");
-  
-  if (isYouTubeUser) {
-    // YouTube users: auto-register with collision handling
-    const displayName = name || username || "YouTuber";
-    initializePlayerRoom(userId, roomId);
-    joinRoom(roomId, userId);
-    const accepted = submitAnswer(questionIndex, userId, displayName, normalizedChoiceId, roomId);
-    
-    if (!accepted) {
-      res.json({
-        ok: true,
-        accepted: false,
-        reason: "already_answered",
-      });
-      return;
-    }
-    
-    res.json({
-      ok: true,
-      accepted: true,
-    });
-    return;
-  }
-
-  // Mobile users: require registration
-  if (!isRegistered(userId)) {
-    res.status(401).json({
-      ok: false,
-      error: "Not registered. Call POST /register first.",
-      reason: "not_registered",
-    });
-    return;
-  }
-
   initializePlayerRoom(userId, roomId);
-  if (!isPlayerInRoom(roomId, userId)) {
-    joinRoom(roomId, userId);
-  }
-
-  const result = submitAnswerForRegistered(questionIndex, userId, normalizedChoiceId, roomId);
-
+  const result = submitAnswerForRegistered(answerWindow.questionIndex, userId, choiceId.toLowerCase(), roomId);
   if (!result.accepted) {
-    res.json({
-      ok: true,
-      accepted: false,
-      reason: result.reason,
-    });
+    res.status(result.reason === "already_answered" ? 409 : 400).json({ ok: false, accepted: false, reason: result.reason });
     return;
   }
-
-  res.json({
-    ok: true,
-    accepted: true,
-  });
+  res.json({ ok: true, accepted: true, questionIndex: answerWindow.questionIndex, receivedAtMs: Date.now() });
 }
 
-router.post("/", (req: Request, res: Response) => {
-  const roomId = (req.body as AnswerBody | undefined)?.roomId || DEFAULT_ROOM_ID;
-  handleAnswer(req, res, roomId);
+router.use(answerRateLimit);
+router.post("/", (req, res) => {
+  const roomId = typeof (req.body as AnswerBody)?.roomId === "string" ? (req.body as { roomId: string }).roomId : DEFAULT_ROOM_ID;
+  processAnswer(req, res, roomId);
 });
-
-router.post("/:roomId", (req: Request<{ roomId: string }>, res: Response) => {
-  handleAnswer(req, res, req.params.roomId);
-});
+router.post("/:roomId", (req, res) => processAnswer(req, res, req.params.roomId));
 
 export default router;
