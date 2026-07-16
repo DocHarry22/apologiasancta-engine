@@ -420,9 +420,33 @@ export function beginAccountPlayerResolution(
   const appliedUserId = result.userId;
   const appliedPlayer = appliedUserId ? players.get(appliedUserId) : undefined;
   const appliedMapping = accountIdentities.get(key);
+  let previousNameReserved = false;
+  if (
+    appliedUserId
+    && previousPlayer
+    && appliedPlayer
+    && previousPlayer.usernameLower !== appliedPlayer.usernameLower
+    && usernameToUserId.get(previousPlayer.usernameLower) === undefined
+  ) {
+    // registerPlayer releases the old canonical name synchronously. Hold it as
+    // a process-local alias until the persistence decision so a guest cannot
+    // claim it while rollback may still need to restore the account.
+    usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+    previousNameReserved = true;
+  }
 
   return {
     value: result,
+    commit: () => {
+      if (!previousNameReserved || !appliedUserId || !previousPlayer) return;
+      const currentPlayer = players.get(appliedUserId);
+      if (
+        currentPlayer?.usernameLower !== previousPlayer.usernameLower
+        && usernameToUserId.get(previousPlayer.usernameLower) === appliedUserId
+      ) {
+        usernameToUserId.delete(previousPlayer.usernameLower);
+      }
+    },
     rollback: () => {
       let changed = false;
 
@@ -455,6 +479,15 @@ export function beginAccountPlayerResolution(
       if (appliedUserId && mappingRolledBack) {
         if (previousWasLinked) accountLinkedUserIds.add(appliedUserId);
         else if (!accountIdentityReferencesUser(appliedUserId)) accountLinkedUserIds.delete(appliedUserId);
+      }
+
+      if (previousNameReserved && appliedUserId && previousPlayer) {
+        const currentPlayer = players.get(appliedUserId);
+        if (currentPlayer?.usernameLower === previousPlayer.usernameLower) {
+          usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+        } else if (usernameToUserId.get(previousPlayer.usernameLower) === appliedUserId) {
+          usernameToUserId.delete(previousPlayer.usernameLower);
+        }
       }
 
       if (changed) schedulePersistence();

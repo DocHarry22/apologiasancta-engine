@@ -10,6 +10,7 @@ import {
 import { verifyJoinToken } from "./security/joinToken";
 import {
   getAccountIdentityMapping,
+  getPlayer,
   getPlayersPersistenceSnapshot,
   initializePlayerRoom,
   isUsernameTaken,
@@ -22,6 +23,7 @@ import {
   joinRoom,
 } from "./state/rooms";
 import {
+  flushPersistence,
   setPostgresPoolFactoryForTests,
   setStatePersistenceDatabaseUrlForTests,
 } from "./state/persistence";
@@ -310,6 +312,139 @@ test("a rejected persistence write rolls back only identity state and the assert
     assert.equal(isPlayerInRoom(room.roomId, "unrelated-player"), true);
   } finally {
     releaseFailedWrite();
+    await server.close();
+  }
+});
+
+test("account rename reserves the old display name until persistence commits or rolls back", async () => {
+  const subject = "account-rename-reservation";
+  const oldDisplayName = "Reserved_Old_Name";
+  const newDisplayName = "Committed_New_Name";
+  const originalRoom = createRoom("Rename Origin", "rename-origin");
+  const targetRoom = createRoom("Rename Target", "rename-target");
+  let releaseFailedWrite!: () => void;
+  let reportWriteStarted!: () => void;
+  const failedWriteGate = new Promise<void>((resolve) => { releaseFailedWrite = resolve; });
+  const writeStarted = new Promise<void>((resolve) => { reportWriteStarted = resolve; });
+  let releaseSuccessfulWrite!: () => void;
+  let reportSuccessfulWriteStarted!: () => void;
+  const successfulWriteGate = new Promise<void>((resolve) => { releaseSuccessfulWrite = resolve; });
+  const successfulWriteStarted = new Promise<void>((resolve) => { reportSuccessfulWriteStarted = resolve; });
+  let rejectRenamedSnapshot = true;
+  let delaySuccessfulRenamedSnapshot = true;
+  const successfulPlayerSnapshots: string[][] = [];
+
+  setStatePersistenceDatabaseUrlForTests("postgresql://test:test@localhost/identity_rename_reservation");
+  setPostgresPoolFactoryForTests(async () => ({
+    query: async (sql, values) => {
+      if (sql.includes("INSERT INTO runtime_state_snapshots")) {
+        const snapshot = JSON.parse(String(values?.[2])) as {
+          players?: { players?: Array<{ username?: string }> };
+        };
+        const displayNames = snapshot.players?.players?.flatMap(
+          (player) => player.username ? [player.username] : []
+        ) ?? [];
+        if (rejectRenamedSnapshot && displayNames.includes(newDisplayName)) {
+          rejectRenamedSnapshot = false;
+          reportWriteStarted();
+          await failedWriteGate;
+          throw new Error("simulated account rename persistence failure");
+        }
+        if (delaySuccessfulRenamedSnapshot && displayNames.includes(newDisplayName)) {
+          delaySuccessfulRenamedSnapshot = false;
+          reportSuccessfulWriteStarted();
+          await successfulWriteGate;
+        }
+        successfulPlayerSnapshots.push(displayNames);
+      }
+      return { rows: [] };
+    },
+    end: async () => undefined,
+  }));
+  configurePersistenceForTests("", "postgres");
+  const server = await startTestServer();
+
+  try {
+    const initialAssertion = signAccountIdentityAssertion({
+      subject,
+      displayName: oldDisplayName,
+      roomId: originalRoom.roomId,
+      nonce: "rename-reservation-initial",
+    });
+    const initial = await exchange(server.baseUrl, initialAssertion);
+    assert.equal(initial.response.status, 200);
+    const initialBody = initial.body as unknown as ExchangeSuccess;
+    assert.equal(initialBody.username, oldDisplayName);
+
+    const renameAssertion = signAccountIdentityAssertion({
+      subject,
+      displayName: newDisplayName,
+      roomId: targetRoom.roomId,
+      nonce: "rename-reservation-retry",
+    });
+    const failedRename = exchange(server.baseUrl, renameAssertion);
+    await writeStarted;
+
+    const guestAttempt = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: oldDisplayName, roomId: originalRoom.roomId }),
+    });
+    assert.equal(guestAttempt.status, 409);
+    assert.equal((await guestAttempt.json() as { reason: string }).reason, "username_taken");
+
+    releaseFailedWrite();
+    const failed = await failedRename;
+    assert.equal(failed.response.status, 503);
+    assert.equal(failed.body.reason, "identity_persistence_failed");
+    assert.equal(getAccountIdentityMapping("apologia-ui", subject)?.userId, initialBody.userId);
+    assert.equal(getPlayer(initialBody.userId)?.username, oldDisplayName);
+    assert.equal(isUsernameTaken(oldDisplayName), true);
+    assert.equal(isUsernameTaken(newDisplayName), false);
+    assert.equal(isPlayerInRoom(originalRoom.roomId, initialBody.userId), true);
+    assert.equal(isPlayerInRoom(targetRoom.roomId, initialBody.userId), false);
+    await flushPersistence();
+    const postRollbackSnapshot = successfulPlayerSnapshots.at(-1) ?? [];
+    assert.equal(postRollbackSnapshot.includes(oldDisplayName), true);
+    assert.equal(postRollbackSnapshot.includes(newDisplayName), false);
+
+    const retryRequest = exchange(server.baseUrl, renameAssertion);
+    await successfulWriteStarted;
+    const guestDuringSuccessfulWrite = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: oldDisplayName, roomId: originalRoom.roomId }),
+    });
+    assert.equal(guestDuringSuccessfulWrite.status, 409);
+    assert.equal((await guestDuringSuccessfulWrite.json() as { reason: string }).reason, "username_taken");
+
+    releaseSuccessfulWrite();
+    const retry = await retryRequest;
+    assert.equal(retry.response.status, 200);
+    const retryBody = retry.body as unknown as ExchangeSuccess;
+    assert.equal(retryBody.userId, initialBody.userId);
+    assert.equal(retryBody.username, newDisplayName);
+    assert.equal(retryBody.identityCreated, false);
+    assert.equal(getPlayer(initialBody.userId)?.username, newDisplayName);
+    assert.equal(isPlayerInRoom(originalRoom.roomId, initialBody.userId), true);
+    assert.equal(isPlayerInRoom(targetRoom.roomId, initialBody.userId), true);
+    assert.equal(isUsernameTaken(oldDisplayName), false);
+    assert.equal(isUsernameTaken(newDisplayName), true);
+
+    const guestRegistration = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: oldDisplayName, roomId: originalRoom.roomId }),
+    });
+    assert.equal(guestRegistration.status, 200);
+    const guestBody = await guestRegistration.json() as { userId: string; username: string };
+    assert.notEqual(guestBody.userId, initialBody.userId);
+    assert.equal(guestBody.username, oldDisplayName);
+    assert.equal(getPlayer(initialBody.userId)?.username, newDisplayName);
+    assert.equal(getPlayer(guestBody.userId)?.username, oldDisplayName);
+  } finally {
+    releaseFailedWrite();
+    releaseSuccessfulWrite();
     await server.close();
   }
 });

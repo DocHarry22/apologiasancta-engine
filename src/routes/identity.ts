@@ -99,6 +99,9 @@ async function exchangeAccountIdentity(payload: AccountIdentityAssertionPayload)
   try {
     transaction = await runPersistedMutation(() => {
       const mutations: Array<PersistenceMutation<unknown>> = [];
+      const commit = () => {
+        for (const mutation of mutations) mutation.commit?.();
+      };
       const rollback = () => {
         const rollbackErrors: unknown[] = [];
         for (const mutation of [...mutations].reverse()) {
@@ -125,7 +128,7 @@ async function exchangeAccountIdentity(payload: AccountIdentityAssertionPayload)
           mutations.push(beginPlayerRoomInitialization(resolved.userId, room.roomId));
           mutations.push(beginRoomJoin(room.roomId, resolved.userId));
         }
-        return { value: resolved, rollback };
+        return { value: resolved, commit, rollback };
       } catch (error) {
         rollback();
         throw error;

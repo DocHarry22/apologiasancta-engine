@@ -41,6 +41,8 @@ export interface PersistenceStatus {
 
 export interface PersistenceMutation<T> {
   value: T;
+  /** Finalize process-local guards after the snapshot is durable. Must not throw. */
+  commit?: () => void;
   rollback: () => void;
 }
 
@@ -394,7 +396,6 @@ export async function runPersistedMutation<T>(
     const mutation = createMutation();
     try {
       await persistNow(config);
-      return mutation.value;
     } catch (error) {
       try {
         mutation.rollback();
@@ -407,6 +408,8 @@ export async function runPersistedMutation<T>(
       }
       throw error;
     }
+    mutation.commit?.();
+    return mutation.value;
   });
 
   writeChain = operation.then(() => undefined, () => undefined);
