@@ -71,7 +71,7 @@ The exchange route also has a coarse shared-server rate limit. Because authentic
 
 ## Persistence and rollback
 
-Mappings are an optional `accountIdentities` section inside the existing atomic runtime snapshot. Old snapshots restore without migration, and older Engine builds ignore the additive field. The exchange forces a persistence flush before returning credentials, so a successful response has a durable mapping when PostgreSQL is healthy.
+Mappings are an optional `accountIdentities` section inside the existing atomic runtime snapshot. Old snapshots restore without migration, and older Engine builds ignore the additive field. The exchange serializes its narrow player, mapping and membership mutation with the persistence write before returning credentials, so a successful response has a durable mapping when PostgreSQL is healthy. If persistence is unavailable or rejects the write, the Engine returns `503` without retaining the failed identity, display-name reservation, room player state or membership.
 
 This remains a whole-runtime, single-instance persistence model. A database outage makes account exchange return `503` while guest registration remains available. To roll back, disable `ACCOUNT_IDENTITY_ENABLED`; mappings remain in the snapshot for later re-enable and existing join tokens continue to work until their normal expiry.
 

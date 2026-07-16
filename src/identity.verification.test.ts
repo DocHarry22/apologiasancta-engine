@@ -8,7 +8,23 @@ import {
   verifyAccountIdentityAssertion,
 } from "./security/accountIdentity";
 import { verifyJoinToken } from "./security/joinToken";
-import { createRoom } from "./state/rooms";
+import {
+  getAccountIdentityMapping,
+  getPlayersPersistenceSnapshot,
+  initializePlayerRoom,
+  isUsernameTaken,
+  registerPlayer,
+} from "./state/players";
+import {
+  createRoom,
+  getRoomsPersistenceSnapshot,
+  isPlayerInRoom,
+  joinRoom,
+} from "./state/rooms";
+import {
+  setPostgresPoolFactoryForTests,
+  setStatePersistenceDatabaseUrlForTests,
+} from "./state/persistence";
 import {
   DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_MAX,
   DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_WINDOW_MS,
@@ -62,6 +78,20 @@ function tamperSignature(value: string): string {
   const [payload, signature] = value.split(".");
   const first = signature[0] === "a" ? "b" : "a";
   return `${payload}.${first}${signature.slice(1)}`;
+}
+
+function assertNoIdentityArtifacts(subject: string, displayName: string): void {
+  const playersSnapshot = getPlayersPersistenceSnapshot();
+  const roomsSnapshot = getRoomsPersistenceSnapshot();
+  assert.equal(getAccountIdentityMapping("apologia-ui", subject), undefined);
+  assert.equal(isUsernameTaken(displayName), false);
+  assert.equal(playersSnapshot.players.some((player) => player.username === displayName), false);
+  assert.equal(playersSnapshot.accountIdentities?.some((mapping) => mapping.subject === subject) ?? false, false);
+  assert.equal(
+    playersSnapshot.roomStates.some((room) => room.playerStates.some((state) => state.userId.startsWith("acct_"))),
+    false
+  );
+  assert.equal(roomsSnapshot.memberships.some((membership) => membership.userId.startsWith("acct_")), false);
 }
 
 test.beforeEach(async () => {
@@ -185,6 +215,143 @@ test("account identity and room join secrets must remain separate at startup and
     assert.equal(unavailable.body.reason, "account_identity_unavailable");
   } finally {
     await server.close();
+  }
+});
+
+test("identity exchange applies no state without persistence and a later retry succeeds cleanly", async () => {
+  const subject = "account-no-persistence";
+  const displayName = "Ambrose";
+  const room = createRoom("Atomic Room", "atomic-room");
+  const assertion = signAccountIdentityAssertion({
+    subject,
+    displayName,
+    roomId: room.roomId,
+    nonce: "no-persistence-nonce-01",
+  });
+  const temp = await createTempStateFilePath();
+  const server = await startTestServer();
+
+  try {
+    const unavailable = await exchange(server.baseUrl, assertion);
+    assert.equal(unavailable.response.status, 503);
+    assert.equal(unavailable.body.reason, "identity_persistence_unavailable");
+    assertNoIdentityArtifacts(subject, displayName);
+
+    configurePersistenceForTests(temp.filePath);
+    const retry = await exchange(server.baseUrl, assertion);
+    assert.equal(retry.response.status, 200);
+    const retryBody = retry.body as unknown as ExchangeSuccess;
+    assert.equal(retryBody.identityCreated, true);
+    assert.equal(retryBody.username, displayName);
+    assert.equal(getAccountIdentityMapping("apologia-ui", subject)?.userId, retryBody.userId);
+    assert.equal(isPlayerInRoom(room.roomId, retryBody.userId), true);
+  } finally {
+    await server.close();
+    await resetPersistenceState();
+    await temp.cleanup();
+  }
+});
+
+test("a rejected persistence write rolls back only identity state and the assertion can retry", async () => {
+  const subject = "account-write-failure";
+  const displayName = "Basil";
+  const room = createRoom("Rollback Room", "rollback-room");
+  const assertion = signAccountIdentityAssertion({
+    subject,
+    displayName,
+    roomId: room.roomId,
+    nonce: "write-failure-nonce-01",
+  });
+  let releaseFailedWrite!: () => void;
+  let reportWriteStarted!: () => void;
+  const failedWriteGate = new Promise<void>((resolve) => { releaseFailedWrite = resolve; });
+  const writeStarted = new Promise<void>((resolve) => { reportWriteStarted = resolve; });
+  let rejectNextWrite = true;
+
+  setStatePersistenceDatabaseUrlForTests("postgresql://test:test@localhost/identity_rollback");
+  setPostgresPoolFactoryForTests(async () => ({
+    query: async (sql) => {
+      if (sql.includes("INSERT INTO runtime_state_snapshots") && rejectNextWrite) {
+        rejectNextWrite = false;
+        reportWriteStarted();
+        await failedWriteGate;
+        throw new Error("simulated identity persistence failure");
+      }
+      return { rows: [] };
+    },
+    end: async () => undefined,
+  }));
+  configurePersistenceForTests("", "postgres");
+  const server = await startTestServer();
+
+  try {
+    const failedExchange = exchange(server.baseUrl, assertion);
+    await writeStarted;
+
+    const unrelated = registerPlayer("Unrelated_Player", "unrelated-player");
+    assert.equal(unrelated.ok, true);
+    initializePlayerRoom("unrelated-player", room.roomId);
+    joinRoom(room.roomId, "unrelated-player");
+    releaseFailedWrite();
+
+    const failed = await failedExchange;
+    assert.equal(failed.response.status, 503);
+    assert.equal(failed.body.reason, "identity_persistence_failed");
+    assertNoIdentityArtifacts(subject, displayName);
+    assert.equal(isUsernameTaken("Unrelated_Player"), true);
+    assert.equal(isPlayerInRoom(room.roomId, "unrelated-player"), true);
+
+    const retry = await exchange(server.baseUrl, assertion);
+    assert.equal(retry.response.status, 200);
+    const retryBody = retry.body as unknown as ExchangeSuccess;
+    assert.equal(retryBody.identityCreated, true);
+    assert.equal(getAccountIdentityMapping("apologia-ui", subject)?.userId, retryBody.userId);
+    assert.equal(isPlayerInRoom(room.roomId, retryBody.userId), true);
+    assert.equal(isPlayerInRoom(room.roomId, "unrelated-player"), true);
+  } finally {
+    releaseFailedWrite();
+    await server.close();
+  }
+});
+
+test("distinct concurrent assertions for one account resolve to one player across rooms", async () => {
+  const temp = await createTempStateFilePath();
+  const alpha = createRoom("Concurrent Alpha", "concurrent-alpha");
+  const beta = createRoom("Concurrent Beta", "concurrent-beta");
+  configurePersistenceForTests(temp.filePath);
+  const subject = "account-concurrent-stable";
+  const alphaAssertion = signAccountIdentityAssertion({
+    subject,
+    displayName: "Chrysostom",
+    roomId: alpha.roomId,
+    nonce: "concurrent-subject-alpha",
+  });
+  const betaAssertion = signAccountIdentityAssertion({
+    subject,
+    displayName: "Chrysostom",
+    roomId: beta.roomId,
+    nonce: "concurrent-subject-beta-1",
+  });
+  const server = await startTestServer();
+
+  try {
+    const [alphaResult, betaResult] = await Promise.all([
+      exchange(server.baseUrl, alphaAssertion),
+      exchange(server.baseUrl, betaAssertion),
+    ]);
+    assert.equal(alphaResult.response.status, 200);
+    assert.equal(betaResult.response.status, 200);
+    const alphaBody = alphaResult.body as unknown as ExchangeSuccess;
+    const betaBody = betaResult.body as unknown as ExchangeSuccess;
+    assert.equal(alphaBody.userId, betaBody.userId);
+    assert.deepEqual([alphaBody.identityCreated, betaBody.identityCreated].sort(), [false, true]);
+    assert.equal(isPlayerInRoom(alpha.roomId, alphaBody.userId), true);
+    assert.equal(isPlayerInRoom(beta.roomId, alphaBody.userId), true);
+    assert.equal(getPlayersPersistenceSnapshot().players.filter((player) => player.userId === alphaBody.userId).length, 1);
+  } finally {
+    await server.close();
+    await resetPersistenceState();
+    await temp.cleanup();
   }
 });
 

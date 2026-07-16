@@ -8,9 +8,17 @@ import {
   verifyAccountIdentityAssertion,
 } from "../security/accountIdentity";
 import { signJoinToken } from "../security/joinToken";
-import { initializePlayerRoom, resolveAccountPlayer } from "../state/players";
-import { flushPersistence } from "../state/persistence";
-import { getPlayerRooms, getRoom, isGameplayRoomSupported, joinRoom } from "../state/rooms";
+import {
+  beginAccountPlayerResolution,
+  beginPlayerRoomInitialization,
+  type ResolveAccountPlayerResult,
+} from "../state/players";
+import {
+  runPersistedMutation,
+  type PersistedMutationOutcome,
+  type PersistenceMutation,
+} from "../state/persistence";
+import { beginRoomJoin, getPlayerRooms, getRoom, isGameplayRoomSupported } from "../state/rooms";
 
 const router = Router();
 interface IdentityExchangeResponse {
@@ -87,31 +95,42 @@ async function exchangeAccountIdentity(payload: AccountIdentityAssertionPayload)
     };
   }
 
-  const resolved = resolveAccountPlayer(payload.issuer, payload.subject, payload.displayName);
-  if (!resolved.ok || !resolved.userId || !resolved.username) {
-    return {
-      status: resolved.reason === "username_taken" ? 409 : 400,
-      body: {
-        ok: false,
-        reason: resolved.reason ?? "identity_resolution_failed",
-        error: resolved.message ?? "Unable to create the account-linked player",
-      },
-    };
-  }
-
-  initializePlayerRoom(resolved.userId, room.roomId);
-  joinRoom(room.roomId, resolved.userId);
+  let transaction: PersistedMutationOutcome<ResolveAccountPlayerResult>;
   try {
-    if (!(await flushPersistence())) {
-      return {
-        status: 503,
-        body: {
-          ok: false,
-          reason: "identity_persistence_unavailable",
-          error: "Account-linked player identity cannot be saved right now",
-        },
+    transaction = await runPersistedMutation(() => {
+      const mutations: Array<PersistenceMutation<unknown>> = [];
+      const rollback = () => {
+        const rollbackErrors: unknown[] = [];
+        for (const mutation of [...mutations].reverse()) {
+          try {
+            mutation.rollback();
+          } catch (error) {
+            rollbackErrors.push(error);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw new AggregateError(rollbackErrors, "Account identity mutation rollback failed");
+        }
       };
-    }
+
+      try {
+        const playerMutation = beginAccountPlayerResolution(
+          payload.issuer,
+          payload.subject,
+          payload.displayName
+        );
+        mutations.push(playerMutation);
+        const resolved = playerMutation.value;
+        if (resolved.ok && resolved.userId && resolved.username) {
+          mutations.push(beginPlayerRoomInitialization(resolved.userId, room.roomId));
+          mutations.push(beginRoomJoin(room.roomId, resolved.userId));
+        }
+        return { value: resolved, rollback };
+      } catch (error) {
+        rollback();
+        throw error;
+      }
+    });
   } catch (error) {
     console.error("[Identity] Failed to persist account-linked player identity", error instanceof Error ? error.message : error);
     return {
@@ -120,6 +139,29 @@ async function exchangeAccountIdentity(payload: AccountIdentityAssertionPayload)
         ok: false,
         reason: "identity_persistence_failed",
         error: "Account-linked player identity cannot be saved right now",
+      },
+    };
+  }
+
+  if (!transaction.persisted) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        reason: "identity_persistence_unavailable",
+        error: "Account-linked player identity cannot be saved right now",
+      },
+    };
+  }
+
+  const resolved = transaction.value;
+  if (!resolved.ok || !resolved.userId || !resolved.username) {
+    return {
+      status: resolved.reason === "username_taken" ? 409 : 400,
+      body: {
+        ok: false,
+        reason: resolved.reason ?? "identity_resolution_failed",
+        error: resolved.message ?? "Unable to create the account-linked player",
       },
     };
   }

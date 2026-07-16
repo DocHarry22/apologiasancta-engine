@@ -8,7 +8,7 @@
 import { randomUUID } from "crypto";
 import { calculateScoreDetails } from "../engine/scoring";
 import { DEFAULT_ROOM_ID, getRoomName } from "./rooms";
-import { schedulePersistence } from "./persistence";
+import { schedulePersistence, type PersistenceMutation } from "./persistence";
 import type { Leaderboard, LeaderboardPeriod, PlayerInfo } from "../types/quiz";
 import { isValidPublicDisplayName, normalizePublicDisplayName } from "../security/publicDisplayName";
 
@@ -394,6 +394,74 @@ export function resolveAccountPlayer(
   return { ...registration, identityCreated: true, displayNameAdjusted };
 }
 
+function accountIdentityReferencesUser(userId: string): boolean {
+  return [...accountIdentities.values()].some((mapping) => mapping.userId === userId);
+}
+
+/**
+ * Apply account resolution with an identity-scoped undo record. Rollback uses
+ * object identity checks so a concurrent mutation of the same player is never
+ * overwritten, and it never restores the full player collection.
+ */
+export function beginAccountPlayerResolution(
+  issuer: string,
+  subject: string,
+  requestedDisplayName: string,
+  nowMs = Date.now()
+): PersistenceMutation<ResolveAccountPlayerResult> {
+  const key = accountIdentityKey(issuer, subject);
+  const previousMapping = accountIdentities.get(key);
+  const previousMappingSnapshot = previousMapping ? { ...previousMapping } : undefined;
+  const previousUserId = previousMapping?.userId;
+  const previousPlayer = previousUserId ? players.get(previousUserId) : undefined;
+  const previousWasLinked = previousUserId ? accountLinkedUserIds.has(previousUserId) : false;
+
+  const result = resolveAccountPlayer(issuer, subject, requestedDisplayName, nowMs);
+  const appliedUserId = result.userId;
+  const appliedPlayer = appliedUserId ? players.get(appliedUserId) : undefined;
+  const appliedMapping = accountIdentities.get(key);
+
+  return {
+    value: result,
+    rollback: () => {
+      let changed = false;
+
+      if (appliedUserId && appliedPlayer && players.get(appliedUserId) === appliedPlayer) {
+        const previousNameOwner = previousPlayer
+          ? usernameToUserId.get(previousPlayer.usernameLower)
+          : undefined;
+        if (!previousPlayer || !previousNameOwner || previousNameOwner === appliedUserId) {
+          if (usernameToUserId.get(appliedPlayer.usernameLower) === appliedUserId) {
+            usernameToUserId.delete(appliedPlayer.usernameLower);
+          }
+          if (previousPlayer) {
+            players.set(appliedUserId, previousPlayer);
+            usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+          } else {
+            players.delete(appliedUserId);
+          }
+          changed = true;
+        }
+      }
+
+      let mappingRolledBack = false;
+      if (appliedMapping && accountIdentities.get(key) === appliedMapping) {
+        if (previousMappingSnapshot) accountIdentities.set(key, previousMappingSnapshot);
+        else accountIdentities.delete(key);
+        mappingRolledBack = true;
+        changed = true;
+      }
+
+      if (appliedUserId && mappingRolledBack) {
+        if (previousWasLinked) accountLinkedUserIds.add(appliedUserId);
+        else if (!accountIdentityReferencesUser(appliedUserId)) accountLinkedUserIds.delete(appliedUserId);
+      }
+
+      if (changed) schedulePersistence();
+    },
+  };
+}
+
 export function getAccountIdentityMapping(issuer: string, subject: string): AccountIdentityMapping | undefined {
   const mapping = accountIdentities.get(accountIdentityKey(issuer, subject));
   return mapping ? { ...mapping } : undefined;
@@ -455,6 +523,39 @@ export function initializePlayerRoom(userId: string, roomId: string = DEFAULT_RO
     return;
   }
   getOrCreatePlayerRoomState(roomId, userId);
+}
+
+export function beginPlayerRoomInitialization(
+  userId: string,
+  roomId: string = DEFAULT_ROOM_ID
+): PersistenceMutation<void> {
+  const previousRoomState = roomStates.get(roomId);
+  const previousPlayerState = previousRoomState?.playerStates.get(userId);
+  initializePlayerRoom(userId, roomId);
+  const appliedRoomState = roomStates.get(roomId);
+  const appliedPlayerState = appliedRoomState?.playerStates.get(userId);
+
+  return {
+    value: undefined,
+    rollback: () => {
+      if (previousPlayerState || !appliedRoomState || !appliedPlayerState) return;
+      const currentRoomState = roomStates.get(roomId);
+      if (currentRoomState !== appliedRoomState || currentRoomState.playerStates.get(userId) !== appliedPlayerState) return;
+      if (appliedPlayerState.score !== 0 || appliedPlayerState.streak !== 0) return;
+
+      currentRoomState.playerStates.delete(userId);
+      if (
+        !previousRoomState
+        && currentRoomState.playerStates.size === 0
+        && currentRoomState.questionAnswers.size === 0
+        && currentRoomState.playerCorrectCounts.size === 0
+        && currentRoomState.scoreEvents.length === 0
+      ) {
+        roomStates.delete(roomId);
+      }
+      schedulePersistence();
+    },
+  };
 }
 
 export function submitAnswerForRegistered(
