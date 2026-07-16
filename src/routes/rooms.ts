@@ -1,250 +1,110 @@
-import { Router, Request, Response } from "express";
-import { getRoom, isPlayerInRoom, joinRoom, leaveRoom, listRooms } from "../state/rooms";
-import { getStateForRoom } from "../state/store";
+import { Router, type Request, type Response } from "express";
+import { answerRateLimit, processAnswer } from "./answer";
+import { handleRegister, registrationRateLimit } from "./register";
 import { getAnswerWindowStatus } from "../engine/roundController";
-import { getLeaderboardForPeriod, initializePlayerRoom, registerPlayer, submitAnswer, submitAnswerForRegistered, isRegistered } from "../state/players";
+import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { signJoinToken } from "../security/joinToken";
 import { addClient, removeClient } from "../sse/broker";
-import { isGameplayRoomSupported } from "../state/rooms";
+import { getPlayer, getLeaderboardForPeriod, initializePlayerRoom, isRegistered } from "../state/players";
+import { getStateForRoom } from "../state/store";
+import { getRoom, isGameplayRoomSupported, isPlayerInRoom, joinRoom, leaveRoom, listRooms } from "../state/rooms";
 import type { LeaderboardPeriod } from "../types/quiz";
 
 const router = Router();
 
-function isRoomOpen(roomId: string, res: Response, ok = false): boolean {
-  if (!isGameplayRoomSupported(roomId)) {
-    res.status(409).json(
-      ok
-        ? { ok: false, error: "Room is closed", roomId }
-        : { error: "Room is closed", roomId }
-    );
-    return false;
-  }
-
-  return true;
+function routeParam(value: string | string[]): string {
+  return Array.isArray(value) ? value[0] ?? "" : value;
 }
 
-router.get("/", (req: Request, res: Response) => {
-  const includeClosed = req.query.includeClosed === "true";
-  return res.json({
-    rooms: listRooms(includeClosed),
-  });
-});
-
-router.get("/:roomId", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
+function requireOpenRoom(roomId: string, res: Response): ReturnType<typeof getRoom> {
+  const room = getRoom(roomId);
   if (!room) {
-    return res.status(404).json({ error: "Room not found" });
+    res.status(404).json({ ok: false, reason: "room_not_found", error: "Room not found" });
+    return null;
   }
+  if (!isGameplayRoomSupported(roomId)) {
+    res.status(409).json({ ok: false, reason: "room_closed", error: "Room is closed", roomId });
+    return null;
+  }
+  return room;
+}
 
+router.get("/", (req, res) => res.json({ rooms: listRooms(req.query.includeClosed === "true") }));
+
+router.get("/:roomId", (req, res) => {
+  const room = getRoom(req.params.roomId);
+  if (!room) return res.status(404).json({ ok: false, error: "Room not found" });
   return res.json({ room });
 });
 
-router.get("/:roomId/leaderboard", (req: Request<{ roomId: string }>, res: Response) => {
+router.get("/:roomId/leaderboard", (req, res) => {
   const room = getRoom(req.params.roomId);
-  if (!room) {
-    return res.status(404).json({ error: "Room not found" });
+  if (!room) return res.status(404).json({ ok: false, error: "Room not found" });
+  const raw = req.query.period;
+  const period: LeaderboardPeriod = raw === "daily" || raw === "weekly" || raw === "all-time" ? raw : "all-time";
+  return res.json({ leaderboard: getLeaderboardForPeriod(period, { roomId: room.roomId }) });
+});
+
+router.post("/:roomId/join", (req: Request<{ roomId: string }>, res) => {
+  const room = requireOpenRoom(req.params.roomId, res);
+  if (!room) return;
+  const userId = req.body?.userId;
+  if (typeof userId !== "string" || !isRegistered(userId)) {
+    return res.status(401).json({ ok: false, reason: "not_registered", error: "Register before joining a room" });
   }
-
-  const periodRaw = req.query.period;
-  const period: LeaderboardPeriod =
-    periodRaw === "daily" || periodRaw === "weekly" || periodRaw === "all-time"
-      ? periodRaw
-      : "all-time";
-
+  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true, allowExpired: true });
+  if (!authorization) return;
+  const player = getPlayer(userId);
+  if (!player) return res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
+  initializePlayerRoom(userId, room.roomId);
+  const membership = joinRoom(room.roomId, userId);
   return res.json({
-    leaderboard: getLeaderboardForPeriod(period, { roomId: room.roomId }),
+    ok: true,
+    room,
+    membership,
+    userId,
+    username: player.username,
+    joinToken: signJoinToken(room.roomId, userId, player.username),
   });
 });
 
-router.post("/:roomId/join", (req: Request<{ roomId: string }>, res: Response) => {
+router.post("/:roomId/leave", (req: Request<{ roomId: string }>, res) => {
   const room = getRoom(req.params.roomId);
-  const userId = req.body?.userId as string | undefined;
-
-  if (!room) {
-    return res.status(404).json({ ok: false, error: "Room not found" });
-  }
-
-  if (!userId || !isRegistered(userId)) {
-    return res.status(401).json({ ok: false, error: "Register before joining a room", reason: "not_registered" });
-  }
-
-  if (!isRoomOpen(room.roomId, res, true)) {
-    return;
-  }
-
-  initializePlayerRoom(userId, room.roomId);
-  const membership = joinRoom(room.roomId, userId);
-  return res.json({ ok: true, room, membership });
-});
-
-router.post("/:roomId/leave", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
-  const userId = req.body?.userId as string | undefined;
-
-  if (!room) {
-    return res.status(404).json({ ok: false, error: "Room not found" });
-  }
-
-  if (!userId) {
-    return res.status(400).json({ ok: false, error: "userId is required" });
-  }
-
-  if (!isPlayerInRoom(room.roomId, userId)) {
-    return res.status(409).json({ ok: false, error: "Player is not in this room", reason: "not_joined" });
-  }
-
+  if (!room) return res.status(404).json({ ok: false, error: "Room not found" });
+  const userId = req.body?.userId;
+  if (typeof userId !== "string") return res.status(400).json({ ok: false, error: "userId is required" });
+  const authorization = requirePlayerAuthorization(req, res, { userId, roomId: room.roomId });
+  if (!authorization) return;
+  if (!isPlayerInRoom(room.roomId, userId)) return res.status(409).json({ ok: false, reason: "not_joined", error: "Player is not in this room" });
   leaveRoom(room.roomId, userId);
   return res.json({ ok: true });
 });
 
-router.get("/:roomId/state", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
-  if (!room) {
-    return res.status(404).json({ error: "Room not found" });
-  }
-
-  if (!isRoomOpen(room.roomId, res)) {
-    return;
-  }
-
-  return res.json(getStateForRoom(room.roomId));
+router.get("/:roomId/state", (req, res) => {
+  const room = requireOpenRoom(req.params.roomId, res);
+  return room ? res.json(getStateForRoom(room.roomId)) : undefined;
 });
 
-router.get("/:roomId/events", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
-  if (!room) {
-    return res.status(404).json({ error: "Room not found" });
-  }
-
-  if (!isRoomOpen(room.roomId, res)) {
-    return;
-  }
-
-  const userId = req.query.userId as string | undefined;
+router.get("/:roomId/events", (req, res) => {
+  const room = requireOpenRoom(req.params.roomId, res);
+  if (!room) return;
+  const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.setTimeout(0);
   res.flushHeaders();
-
   const clientId = addClient(res, userId, room.roomId);
-  req.on("close", () => {
-    removeClient(clientId);
-  });
+  req.on("close", () => removeClient(clientId));
 });
 
-router.post("/:roomId/register", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
-  if (!room) {
-    return res.status(404).json({ ok: false, error: "Room not found" });
-  }
+router.post("/:roomId/register", registrationRateLimit, (req, res) => handleRegister(req, res, routeParam(req.params.roomId)));
+router.post("/:roomId/answer", answerRateLimit, (req, res) => processAnswer(req, res, routeParam(req.params.roomId)));
 
-  if (!isRoomOpen(room.roomId, res, true)) {
-    return;
-  }
-
-  const { username, userId } = req.body as { username?: string; userId?: string };
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({
-      ok: false,
-      reason: "invalid_format",
-      message: "Username is required",
-    });
-  }
-
-  const result = registerPlayer(username, userId);
-  if (!result.ok) {
-    return res.status(result.reason === "username_taken" ? 409 : 400).json(result);
-  }
-
-  initializePlayerRoom(result.userId!, room.roomId);
-  joinRoom(room.roomId, result.userId!);
-
-  return res.json({
-    ...result,
-    roomId: room.roomId,
-  });
-});
-
-router.post("/:roomId/answer", (req: Request<{ roomId: string }>, res: Response) => {
-  const room = getRoom(req.params.roomId);
-  if (!room) {
-    return res.status(404).json({ ok: false, error: "Room not found" });
-  }
-
-  if (!isRoomOpen(room.roomId, res, true)) {
-    return;
-  }
-
-  const { userId, name, username, choiceId } = req.body as {
-    userId?: string;
-    name?: string;
-    username?: string;
-    choiceId?: string;
-  };
-
-  if (!userId || !choiceId) {
-    return res.status(400).json({
-      ok: false,
-      error: "Missing required fields: userId, choiceId",
-    });
-  }
-
-  const validChoices = ["a", "b", "c", "d"];
-  const normalizedChoiceId = choiceId.toLowerCase();
-  if (!validChoices.includes(normalizedChoiceId)) {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid choiceId. Must be a, b, c, or d",
-    });
-  }
-
-  const answerWindow = getAnswerWindowStatus(room.roomId);
-  if (!answerWindow.accepting) {
-    return res.status(409).json({
-      ok: false,
-      accepted: false,
-      error: answerWindow.reason === "too_late"
-        ? "Answer deadline has passed"
-        : answerWindow.reason === "game_paused"
-          ? "Quiz is paused"
-          : "Answers are locked",
-      reason: answerWindow.reason,
-      phase: answerWindow.phase,
-      endsAtMs: answerWindow.endsAtMs,
-    });
-  }
-
-  const questionIndex = answerWindow.questionIndex;
-  if (userId.startsWith("yt:")) {
-    const displayName = name || username || "YouTuber";
-    initializePlayerRoom(userId, room.roomId);
-    if (!isPlayerInRoom(room.roomId, userId)) {
-      joinRoom(room.roomId, userId);
-    }
-    const accepted = submitAnswer(questionIndex, userId, displayName, normalizedChoiceId, room.roomId);
-    return res.json({ ok: true, accepted, ...(accepted ? {} : { reason: "already_answered" }) });
-  }
-
-  if (!isRegistered(userId)) {
-    return res.status(401).json({
-      ok: false,
-      error: "Not registered. Call POST /register first.",
-      reason: "not_registered",
-    });
-  }
-
-  initializePlayerRoom(userId, room.roomId);
-  if (!isPlayerInRoom(room.roomId, userId)) {
-    joinRoom(room.roomId, userId);
-  }
-
-  const result = submitAnswerForRegistered(questionIndex, userId, normalizedChoiceId, room.roomId);
-  return res.json({
-    ok: true,
-    accepted: result.accepted,
-    ...(result.accepted ? {} : { reason: result.reason }),
-  });
+router.get("/:roomId/answer-window", (req, res) => {
+  const room = requireOpenRoom(req.params.roomId, res);
+  return room ? res.json(getAnswerWindowStatus(room.roomId)) : undefined;
 });
 
 export default router;

@@ -1,377 +1,186 @@
-/**
- * POST /register - Register a unique username
- * GET /me - Get current player state
- * GET /rank - Get player's rank info
- */
-
-import { Router, Request, Response } from "express";
+import { Router, type Request, type Response } from "express";
+import { createRateLimit, stopRateLimitCleanup } from "../middleware/rateLimit";
+import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { signJoinToken } from "../security/joinToken";
 import {
-  registerPlayer,
   getPlayer,
   getPlayerInfo,
   getPlayerRank,
-  getDistanceToTop10,
-  isValidUsername,
-  isUsernameTaken,
   initializePlayerRoom,
+  isUsernameTaken,
+  isValidUsername,
+  registerPlayer,
 } from "../state/players";
 import { DEFAULT_ROOM_ID, getPlayerRooms, isGameplayRoomSupported, joinRoom, requireRoom } from "../state/rooms";
 
 const router = Router();
+export const DEFAULT_REGISTRATION_RATE_LIMIT_MAX = 120;
+export const DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 
-/**
- * Simple rate limiting for registration
- * Map<IP, { count: number, resetAt: number }>
- */
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-const RATE_LIMIT_MAX = 10;
-const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+export const registrationRateLimit = createRateLimit({
+  name: "REGISTER",
+  max: DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+  windowMs: DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
+  message: "Too many registration attempts. Try again later.",
+});
 
-// Periodically prune expired entries to prevent unbounded memory growth.
-// The timer is unref'd so it does not block graceful shutdown.
-const rateLimitCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [ip, entry] of rateLimitMap) {
-    if (now > entry.resetAt) {
-      rateLimitMap.delete(ip);
-    }
-  }
-}, RATE_LIMIT_WINDOW_MS);
-rateLimitCleanupTimer.unref();
+type RegisterBody = { username?: unknown; userId?: unknown; roomId?: unknown };
+type RenameBody = { userId?: unknown; newUsername?: unknown; roomId?: unknown };
 
-/**
- * Stop the rate-limit cleanup timer.
- * Call this during application shutdown to release resources cleanly.
- */
-export function stopRateLimitCleanup(): void {
-  clearInterval(rateLimitCleanupTimer);
+function routeParam(value: string | string[]): string {
+  return Array.isArray(value) ? value[0] ?? "" : value;
 }
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  let entry = rateLimitMap.get(ip);
-  
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-  }
-  
-  entry.count++;
-  rateLimitMap.set(ip, entry);
-  
-  return entry.count <= RATE_LIMIT_MAX;
-}
-
-interface RegisterBody {
-  username: string;
-  userId?: string;
-  roomId?: string;
-}
-
-interface RenameBody {
-  userId: string;
-  newUsername: string;
-  roomId?: string;
-}
-
-function validateRoomForGameplay(res: Response, roomId: string): boolean {
+function validateRoom(res: Response, roomId: string): boolean {
   try {
     requireRoom(roomId);
   } catch {
-    res.status(404).json({ ok: false, error: "Room not found" });
+    res.status(404).json({ ok: false, reason: "room_not_found", error: "Room not found" });
     return false;
   }
-
   if (!isGameplayRoomSupported(roomId)) {
-    res.status(409).json({
-      ok: false,
-      error: "Room is closed",
-      roomId,
-    });
+    res.status(409).json({ ok: false, reason: "room_closed", error: "Room is closed", roomId });
     return false;
   }
-
   return true;
 }
 
-/**
- * POST /register
- * Body: { username: string, userId?: string }
- * 
- * Returns:
- * - 200 { ok: true, userId, username } on success
- * - 400 { ok: false, reason: "invalid_format", message } if invalid
- * - 409 { ok: false, reason: "username_taken", message } if taken
- * - 429 if rate limited
- */
-function handleRegister(req: Request, res: Response, roomId: string): void {
-  if (!validateRoomForGameplay(res, roomId)) {
+export function handleRegister(req: Request, res: Response, roomId: string): void {
+  if (!validateRoom(res, roomId)) return;
+  const body = req.body as RegisterBody;
+  if (typeof body?.username !== "string") {
+    res.status(400).json({ ok: false, reason: "invalid_format", error: "A display name is required" });
     return;
   }
 
-  // Rate limiting
-  const ip = req.ip || req.socket.remoteAddress || "unknown";
-  if (!checkRateLimit(ip)) {
-    res.status(429).json({
-      ok: false,
-      reason: "rate_limited",
-      message: "Too many registration attempts. Try again in 10 minutes.",
+  let authorizedUserId: string | undefined;
+  if (body.userId !== undefined) {
+    if (typeof body.userId !== "string" || body.userId.length > 200) {
+      res.status(400).json({ ok: false, reason: "invalid_user_id", error: "Invalid player ID" });
+      return;
+    }
+    const authorization = requirePlayerAuthorization(req, res, {
+      userId: body.userId,
+      allowDifferentRoom: true,
+      allowExpired: true,
     });
-    return;
+    if (!authorization) return;
+    authorizedUserId = body.userId;
   }
 
-  const { username, userId } = req.body as RegisterBody;
-
-  // Validate input
-  if (!username || typeof username !== "string") {
-    res.status(400).json({
-      ok: false,
-      reason: "invalid_format",
-      message: "Username is required",
-    });
+  const result = registerPlayer(body.username, authorizedUserId);
+  if (!result.ok || !result.userId || !result.username) {
+    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
     return;
   }
-
-  // Attempt registration
-  const result = registerPlayer(username, userId);
-
-  if (!result.ok) {
-    const status = result.reason === "username_taken" ? 409 : 400;
-    res.status(status).json(result);
-    return;
-  }
-
-  initializePlayerRoom(result.userId!, roomId);
-  joinRoom(roomId, result.userId!);
-
+  initializePlayerRoom(result.userId, roomId);
+  joinRoom(roomId, result.userId);
   res.json({
     ...result,
     roomId,
+    joinToken: signJoinToken(roomId, result.userId, result.username),
   });
 }
 
-router.post("/", (req: Request, res: Response) => {
-  const roomId = (req.body as RegisterBody | undefined)?.roomId || DEFAULT_ROOM_ID;
-  handleRegister(req, res, roomId);
-});
-
-/**
- * GET /me?userId=...
- * 
- * Returns current player state or 404 if not registered
- */
 function handleMe(req: Request, res: Response, roomId: string): void {
-  if (!validateRoomForGameplay(res, roomId)) {
+  if (!validateRoom(res, roomId)) return;
+  const userId = req.query.userId;
+  if (typeof userId !== "string" || !userId) {
+    res.status(400).json({ ok: false, reason: "missing_user_id", error: "userId is required" });
     return;
   }
-
-  const userId = req.query.userId as string;
-
-  if (!userId) {
-    res.status(400).json({
-      ok: false,
-      reason: "missing_userId",
-      message: "userId query parameter required",
-    });
-    return;
-  }
-
+  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true, allowExpired: true });
+  if (!authorization) return;
   const player = getPlayer(userId);
   if (!player) {
-    res.status(404).json({
-      ok: false,
-      reason: "not_registered",
-      message: "User not registered",
-    });
+    res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
     return;
   }
-
   initializePlayerRoom(userId, roomId);
   joinRoom(roomId, userId);
-
   res.json({
     ok: true,
-    userId: player.userId,
+    userId,
     username: player.username,
     totalPoints: getPlayerInfo(userId, roomId)?.totalPoints ?? 0,
     streak: getPlayerInfo(userId, roomId)?.streak ?? 0,
     rank: getPlayerRank(userId, roomId),
     roomId,
     rooms: getPlayerRooms(userId),
+    joinToken: signJoinToken(roomId, userId, player.username),
   });
 }
 
-router.get("/me", (req: Request, res: Response) => {
-  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
-  handleMe(req, res, roomId);
-});
-
-/**
- * GET /rank?userId=...
- * 
- * Returns player's rank and distance to top 10
- */
 function handleRank(req: Request, res: Response, roomId: string): void {
-  if (!validateRoomForGameplay(res, roomId)) {
+  if (!validateRoom(res, roomId)) return;
+  const userId = req.query.userId;
+  if (typeof userId !== "string" || !userId) {
+    res.status(400).json({ ok: false, reason: "missing_user_id", error: "userId is required" });
     return;
   }
-
-  const userId = req.query.userId as string;
-
-  if (!userId) {
-    res.status(400).json({
-      ok: false,
-      reason: "missing_userId",
-      message: "userId query parameter required",
-    });
-    return;
-  }
-
   const info = getPlayerInfo(userId, roomId);
   if (!info) {
-    res.status(404).json({
-      ok: false,
-      reason: "not_registered",
-      message: "User not registered",
-    });
+    res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
     return;
   }
-
-  res.json({
-    ok: true,
-    rank: info.rank,
-    totalPoints: info.totalPoints,
-    streak: info.streak,
-    distanceToTop10: info.distanceToTop10,
-    roomId,
-  });
+  res.json({ ok: true, ...info, roomId });
 }
 
-router.get("/rank", (req: Request, res: Response) => {
-  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
-  handleRank(req, res, roomId);
-});
-
-/**
- * POST /rename
- * Body: { userId: string, newUsername: string }
- * 
- * Allows changing username (same uniqueness rules)
- */
 function handleRename(req: Request, res: Response, roomId: string): void {
-  if (!validateRoomForGameplay(res, roomId)) {
+  if (!validateRoom(res, roomId)) return;
+  const body = req.body as RenameBody;
+  if (typeof body.userId !== "string" || typeof body.newUsername !== "string") {
+    res.status(400).json({ ok: false, reason: "invalid_format", error: "userId and newUsername are required" });
     return;
   }
-
-  const { userId, newUsername } = req.body as RenameBody;
-
-  if (!userId || !newUsername) {
-    res.status(400).json({
-      ok: false,
-      reason: "invalid_format",
-      message: "userId and newUsername required",
-    });
+  const authorization = requirePlayerAuthorization(req, res, { userId: body.userId, allowDifferentRoom: true, allowExpired: true });
+  if (!authorization) return;
+  if (!getPlayer(body.userId)) {
+    res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
     return;
   }
-
-  const current = getPlayer(userId);
-  if (!current) {
-    res.status(404).json({
-      ok: false,
-      reason: "not_registered",
-      message: "User not registered",
-    });
+  const result = registerPlayer(body.newUsername, body.userId);
+  if (!result.ok || !result.userId || !result.username) {
+    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
     return;
   }
-
-  // Re-register with new username (this handles uniqueness)
-  const result = registerPlayer(newUsername, userId);
-  if (!result.ok) {
-    const status = result.reason === "username_taken" ? 409 : 400;
-    res.status(status).json(result);
-    return;
-  }
-
-  initializePlayerRoom(userId, roomId);
-  joinRoom(roomId, userId);
-
-  res.json({
-    ...result,
-    roomId,
-  });
+  initializePlayerRoom(result.userId, roomId);
+  joinRoom(roomId, result.userId);
+  res.json({ ...result, roomId, joinToken: signJoinToken(roomId, result.userId, result.username) });
 }
 
-router.post("/rename", (req: Request, res: Response) => {
-  const roomId = (req.body as RenameBody | undefined)?.roomId || DEFAULT_ROOM_ID;
-  handleRename(req, res, roomId);
-});
-
-/**
- * GET /check?username=...
- * 
- * Check if a username is available (without actually registering)
- */
 function handleCheck(req: Request, res: Response, roomId: string): void {
-  if (!validateRoomForGameplay(res, roomId)) {
+  if (!validateRoom(res, roomId)) return;
+  const username = req.query.username;
+  if (typeof username !== "string" || !username) {
+    res.status(400).json({ ok: false, available: false, reason: "missing_username" });
     return;
   }
-
-  const username = req.query.username as string;
-
-  if (!username) {
-    res.status(400).json({
-      ok: false,
-      available: false,
-      reason: "missing_username",
-    });
-    return;
-  }
-
-  // Validate format first
   const normalized = username.trim().replace(/\s+/g, "_").slice(0, 20);
   if (!isValidUsername(normalized)) {
-    res.json({
-      ok: true,
-      available: false,
-      reason: "invalid_format",
-      message: "Username must be 3-20 characters, alphanumeric or underscore only",
-    });
+    res.json({ ok: true, available: false, reason: "invalid_format", error: "Use 3-20 letters, numbers, or underscores" });
     return;
   }
-
-  // Check availability via lookup (no registration)
-  const isTaken = isUsernameTaken(normalized);
-
-  res.json({
-    ok: true,
-    available: !isTaken,
-    username: normalized,
-    ...(isTaken ? { reason: "username_taken" } : {}),
-  });
+  const taken = isUsernameTaken(normalized);
+  res.json({ ok: true, available: !taken, username: normalized, ...(taken ? { reason: "username_taken" } : {}) });
 }
 
-router.get("/check", (req: Request, res: Response) => {
-  const roomId = (req.query.roomId as string | undefined) || DEFAULT_ROOM_ID;
-  handleCheck(req, res, roomId);
+router.post("/", registrationRateLimit, (req, res) => {
+  const roomId = typeof (req.body as RegisterBody)?.roomId === "string" ? (req.body as { roomId: string }).roomId : DEFAULT_ROOM_ID;
+  handleRegister(req, res, roomId);
 });
-
-router.post("/:roomId", (req: Request<{ roomId: string }>, res: Response) => {
-  handleRegister(req, res, req.params.roomId);
+router.get("/me", (req, res) => handleMe(req, res, typeof req.query.roomId === "string" ? req.query.roomId : DEFAULT_ROOM_ID));
+router.get("/rank", (req, res) => handleRank(req, res, typeof req.query.roomId === "string" ? req.query.roomId : DEFAULT_ROOM_ID));
+router.post("/rename", registrationRateLimit, (req, res) => {
+  const roomId = typeof (req.body as RenameBody)?.roomId === "string" ? (req.body as { roomId: string }).roomId : DEFAULT_ROOM_ID;
+  handleRename(req, res, roomId);
 });
+router.get("/check", (req, res) => handleCheck(req, res, typeof req.query.roomId === "string" ? req.query.roomId : DEFAULT_ROOM_ID));
+router.post("/:roomId", registrationRateLimit, (req, res) => handleRegister(req, res, routeParam(req.params.roomId)));
+router.get("/:roomId/me", (req, res) => handleMe(req, res, routeParam(req.params.roomId)));
+router.get("/:roomId/rank", (req, res) => handleRank(req, res, routeParam(req.params.roomId)));
+router.post("/:roomId/rename", registrationRateLimit, (req, res) => handleRename(req, res, routeParam(req.params.roomId)));
+router.get("/:roomId/check", (req, res) => handleCheck(req, res, routeParam(req.params.roomId)));
 
-router.get("/:roomId/me", (req: Request<{ roomId: string }>, res: Response) => {
-  handleMe(req, res, req.params.roomId);
-});
-
-router.get("/:roomId/rank", (req: Request<{ roomId: string }>, res: Response) => {
-  handleRank(req, res, req.params.roomId);
-});
-
-router.post("/:roomId/rename", (req: Request<{ roomId: string }>, res: Response) => {
-  handleRename(req, res, req.params.roomId);
-});
-
-router.get("/:roomId/check", (req: Request<{ roomId: string }>, res: Response) => {
-  handleCheck(req, res, req.params.roomId);
-});
-
+export { stopRateLimitCleanup };
 export default router;

@@ -12,6 +12,13 @@ import {
   submitAnswerForRegistered,
 } from "./state/players";
 import { createRoom, getRoom, joinRoom } from "./state/rooms";
+import { signJoinToken, validateProductionJoinSecret, verifyJoinToken } from "./security/joinToken";
+import { resolveAllowedOrigins } from "./config/cors";
+import { resolveRateLimitSettings } from "./middleware/rateLimit";
+import {
+  DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+  DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
+} from "./routes/register";
 import {
   flushPersistence,
   getPersistenceStatus,
@@ -135,7 +142,7 @@ test("admin and health endpoints expose persistence state and closed rooms block
       body: JSON.stringify({ username: "Alice" }),
     });
     assert.equal(registerResponse.status, 200);
-    const registered = await registerResponse.json() as { userId: string };
+    const registered = await registerResponse.json() as { userId: string; joinToken: string };
 
     const roomResponse = await fetch(`${server.baseUrl}/admin/rooms`, {
       method: "POST",
@@ -146,7 +153,7 @@ test("admin and health endpoints expose persistence state and closed rooms block
 
     const joinResponse = await fetch(`${server.baseUrl}/rooms/alpha-room/join`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${registered.joinToken}` },
       body: JSON.stringify({ userId: registered.userId }),
     });
     assert.equal(joinResponse.status, 200);
@@ -168,7 +175,7 @@ test("admin and health endpoints expose persistence state and closed rooms block
 
     const blockedJoin = await fetch(`${server.baseUrl}/rooms/alpha-room/join`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${registered.joinToken}` },
       body: JSON.stringify({ userId: registered.userId }),
     });
     assert.equal(blockedJoin.status, 409);
@@ -187,6 +194,15 @@ test("admin and health endpoints expose persistence state and closed rooms block
     assert.equal(health.persistence.path.endsWith("runtime-state.json"), true);
     assert.equal(typeof health.persistence.lastSavedAt, "number");
     assert.equal(health.roomDetails.some((room) => room.roomId === "alpha-room" && room.isActive === false), true);
+
+    const diagnosticsResponse = await fetch(`${server.baseUrl}/diagnostics`);
+    assert.equal(diagnosticsResponse.status, 200);
+    const diagnosticsText = await diagnosticsResponse.text();
+    assert.equal(diagnosticsText.includes("dev-admin-token"), false);
+    assert.equal(diagnosticsText.includes("PLAYER_JOIN_SECRET"), false);
+    const diagnostics = JSON.parse(diagnosticsText) as { readiness: { persistence: boolean; corsOriginCount: number } };
+    assert.equal(diagnostics.readiness.persistence, true);
+    assert.equal(diagnostics.readiness.corsOriginCount > 0, true);
   } finally {
     await server.close();
     await temp.cleanup();
@@ -528,7 +544,7 @@ test("answer window rejects paused, early, and expired submissions using server 
   assert.equal(pausedAgain.reason, "game_paused");
 });
 
-test("answer API refuses submissions before the controller starts", async () => {
+test("answer API requires a room token and refuses submissions before the controller starts", async () => {
   const server = await startTestServer();
   try {
     const registration = await fetch(`${server.baseUrl}/register`, {
@@ -537,11 +553,18 @@ test("answer API refuses submissions before the controller starts", async () => 
       body: JSON.stringify({ username: "WindowTester" }),
     });
     assert.equal(registration.status, 200);
-    const player = await registration.json() as { userId: string };
+    const player = await registration.json() as { userId: string; joinToken: string };
+
+    const unauthorized = await fetch(`${server.baseUrl}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: player.userId, choiceId: "a" }),
+    });
+    assert.equal(unauthorized.status, 401);
 
     const answer = await fetch(`${server.baseUrl}/answer`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${player.joinToken}` },
       body: JSON.stringify({ userId: player.userId, choiceId: "a" }),
     });
     assert.equal(answer.status, 409);
@@ -551,4 +574,76 @@ test("answer API refuses submissions before the controller starts", async () => 
   } finally {
     await server.close();
   }
+});
+
+test("join tokens are signed, room-scoped, tamper-evident, and expiring", () => {
+  const issuedAtMs = 1_700_000_000_000;
+  const token = signJoinToken("alpha-room", "player-1", "Alice", issuedAtMs);
+  const valid = verifyJoinToken(token, issuedAtMs + 1000);
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.payload.roomId, "alpha-room");
+    assert.equal(valid.payload.userId, "player-1");
+  }
+
+  const [payload, signature] = token.split(".");
+  const tampered = `${payload}.${signature.slice(0, -1)}${signature.endsWith("a") ? "b" : "a"}`;
+  assert.deepEqual(verifyJoinToken(tampered, issuedAtMs + 1000), { ok: false, reason: "invalid_signature" });
+  const expired = verifyJoinToken(token, issuedAtMs + 25 * 60 * 60 * 1000);
+  assert.equal(expired.ok, false);
+  assert.equal(expired.reason, "expired");
+});
+
+test("production join secrets reject documented placeholders and require 32 bytes", () => {
+  const documentedPlaceholders = [
+    "replace-with-join-secret",
+    "replace-with-32-byte-random-secret",
+    "your-secure-player-join-secret",
+    "apologia-sancta-local-join-token-secret",
+    "change-me",
+    "placeholder",
+  ];
+
+  for (const value of documentedPlaceholders) {
+    assert.deepEqual(validateProductionJoinSecret(value), { ok: false, reason: "placeholder" });
+  }
+  assert.deepEqual(validateProductionJoinSecret(undefined), { ok: false, reason: "missing" });
+  assert.deepEqual(validateProductionJoinSecret("a".repeat(31)), { ok: false, reason: "too_short" });
+  assert.deepEqual(validateProductionJoinSecret("a".repeat(32)), { ok: true });
+  assert.deepEqual(validateProductionJoinSecret("é".repeat(16)), { ok: true });
+});
+
+test("registration rate limits use a classroom-safe default and environment overrides", () => {
+  assert.equal(DEFAULT_REGISTRATION_RATE_LIMIT_MAX, 120);
+  assert.equal(DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS, 600_000);
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", {
+      max: DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+      windowMs: DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
+    }, {}),
+    { max: 120, windowMs: 600_000 }
+  );
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", { max: 120, windowMs: 600_000 }, {
+      RATE_LIMIT_REGISTER_MAX: "250",
+      RATE_LIMIT_REGISTER_WINDOW_MS: "300000",
+    }),
+    { max: 250, windowMs: 300_000 }
+  );
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", { max: 120, windowMs: 600_000 }, {
+      RATE_LIMIT_REGISTER_MAX: "0",
+      RATE_LIMIT_REGISTER_WINDOW_MS: "invalid",
+    }),
+    { max: 120, windowMs: 600_000 }
+  );
+});
+
+test("production CORS excludes localhost unless it is explicitly enabled", () => {
+  const production = resolveAllowedOrigins({ NODE_ENV: "production", CORS_ORIGINS: "https://example.org" });
+  assert.equal(production.includes("https://example.org"), true);
+  assert.equal(production.some((origin) => origin.includes("localhost")), false);
+
+  const optedIn = resolveAllowedOrigins({ NODE_ENV: "production", ALLOW_LOCAL_ORIGINS: "true" });
+  assert.equal(optedIn.includes("http://localhost:3000"), true);
 });

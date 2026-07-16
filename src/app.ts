@@ -1,169 +1,101 @@
-/**
- * Express Application Setup
- *
- * Configures middleware, CORS, and routes.
- */
-
-import express from "express";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
-
-import healthRouter from "./routes/health";
-import stateRouter from "./routes/state";
-import eventsRouter from "./routes/events";
-import answerRouter from "./routes/answer";
+import express from "express";
 import adminRouter from "./routes/admin";
 import adminYoutubeRouter from "./routes/adminYoutube";
+import answerRouter from "./routes/answer";
 import contentAdminRouter from "./routes/content";
-import registerRouter from "./routes/register";
-import topicsRouter from "./routes/topics";
-import roomsRouter from "./routes/rooms";
+import diagnosticsRouter from "./routes/diagnostics";
+import eventsRouter from "./routes/events";
+import healthRouter from "./routes/health";
 import leaderboardRouter from "./routes/leaderboard";
-import { releasesRouter, adminReleasesRouter } from "./routes/releases";
+import registerRouter from "./routes/register";
+import { adminReleasesRouter, releasesRouter } from "./routes/releases";
+import roomsRouter from "./routes/rooms";
+import stateRouter from "./routes/state";
+import topicsRouter from "./routes/topics";
 import { getStatus } from "./engine/roundController";
+import { allowedOrigins } from "./config/cors";
 
-/**
- * Parse ALLOWED_ORIGIN env var as comma-separated list
- */
-function parseAllowedOrigins(): string[] {
-  const isDev = process.env.NODE_ENV !== "production";
-  const localDevOrigins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
-    "http://localhost:3003",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:3002",
-    "http://127.0.0.1:3003",
-    "http://127.0.0.1:5173",
-  ];
-  const productionOrigins = [
-    "https://sandybrown-bear-488955.hostingersite.com",
-    "https://apologiasancta-ui.onrender.com",
-  ];
-  const includeLocalOrigins = isDev || process.env.ALLOW_LOCAL_ORIGINS !== "false";
-  const origins = new Set<string>([
-    ...productionOrigins,
-    ...(includeLocalOrigins ? localDevOrigins : []),
-  ]);
+type HttpError = Error & { statusCode?: number };
 
-  const envOrigins = process.env.ALLOWED_ORIGIN;
-  if (envOrigins) {
-    const parsed = envOrigins
-      .split(",")
-      .map((o) => o.trim())
-      .filter((o) => o.length > 0);
-    for (const origin of parsed) {
-      origins.add(origin);
-    }
-  }
-
-  if (!isDev && origins.size === 0) {
-    console.warn("[Config] No ALLOWED_ORIGIN values configured in production; browser clients will be blocked by CORS.");
-  }
-
-  return [...origins];
-}
-
-const allowedOrigins = parseAllowedOrigins();
-
-/**
- * CORS configuration
- * - Simple CORS without credentials for EventSource compatibility
- * - Uses allowlist from ALLOWED_ORIGIN env var
- */
 const corsOptions: cors.CorsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (curl, Postman, mobile apps, etc.)
-    if (!origin) {
+    if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
       return;
     }
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`[CORS] Blocked origin: ${origin}`);
-      callback(new Error("Not allowed by CORS"));
-    }
+    const error = new Error("Origin not allowed") as HttpError;
+    error.statusCode = 403;
+    callback(error);
   },
-  credentials: false, // EventSource doesn't need credentials
+  credentials: false,
 };
 
-/**
- * Create and configure Express application
- */
 export function createApp(): express.Application {
   const app = express();
-
-  // Log allowed origins for debugging
-  const isDev = process.env.NODE_ENV !== "production";
-  if (isDev) {
-    console.log("[Config] Allowed origins:", allowedOrigins.join(", "));
-  }
-
-  // Middleware
+  app.disable("x-powered-by");
+  app.set("trust proxy", 1);
+  app.use((req, res, next) => {
+    const requestId = req.get("x-request-id")?.slice(0, 100) || randomUUID();
+    res.setHeader("X-Request-Id", requestId);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    next();
+  });
   app.use(cors(corsOptions));
-  // Limit JSON body size to prevent large-payload DoS attacks
   app.use(express.json({ limit: "64kb" }));
 
-  // Routes
   app.use("/health", healthRouter);
+  app.use("/diagnostics", diagnosticsRouter);
   app.use("/state", stateRouter);
   app.use("/events", eventsRouter);
   app.use("/answer", answerRouter);
   app.use("/register", registerRouter);
   app.use("/rooms", roomsRouter);
   app.use("/leaderboard", leaderboardRouter);
-  app.use("/topics", topicsRouter); // Public content browsing
-  app.use("/releases", releasesRouter); // Public release archive
+  app.use("/topics", topicsRouter);
+  app.use("/releases", releasesRouter);
   app.use("/admin", adminRouter);
   app.use("/admin/releases", adminReleasesRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
-  app.use("/admin", contentAdminRouter); // Content management routes
+  app.use("/admin", contentAdminRouter);
 
-  // Root endpoint - API info
   app.get("/", (_req, res) => {
-    const status = getStatus();
     res.json({
       name: "Apologia Sancta Engine",
-      version: "1.0.0",
+      version: process.env.npm_package_version ?? "1.0.0",
       endpoints: {
-        health: "GET /health - Health check",
-        state: "GET /state - Current quiz state",
-        events: "GET /events?userId=... - SSE stream (personalized if userId provided)",
-        answer: "POST /answer - Submit answer",
-        register: "POST /register - Register unique username, GET /me/:userId, GET /rank/:userId, POST /rename",
-        rooms: "GET /rooms - List rooms, GET /rooms/:roomId - Room summary",
-        leaderboard: "GET /leaderboard?period=all-time|daily|weekly - Global leaderboard, GET /rooms/:roomId/leaderboard - Room leaderboard",
-        topics: "GET /topics - List topics with counts, GET /topics/:id - Topic details (public)",
-        releases: "GET /releases - Public release archive, GET /releases/latest - Latest release",
-        admin: "POST /admin/start|resume|pause|next|reset|persistence/save - Admin controls (requires x-admin-token)",
-        adminReleases: "GET|POST /admin/releases, PATCH /admin/releases/:id/read (requires x-admin-token)",
-        youtube: "POST /admin/youtube/* - YouTube Live Chat integration (requires x-admin-token)",
-        content: "POST /admin/content/* - Content management (requires x-admin-token)",
-        quizSet: "POST /admin/quiz/set - Set active quiz pool (requires x-admin-token)",
+        health: "GET /health",
+        diagnostics: "GET /diagnostics",
+        state: "GET /state?roomId=...",
+        events: "GET /events?roomId=...&userId=...",
+        answer: "POST /answer",
+        register: "POST /register",
+        rooms: "GET /rooms",
+        leaderboard: "GET /leaderboard?period=all-time|daily|weekly",
+        topics: "GET /topics",
+        releases: "GET /releases",
       },
-      controller: status,
+      controller: getStatus(),
     });
   });
 
-  // Error handler
-  app.use(
-    (
-      err: Error,
-      _req: express.Request,
-      res: express.Response,
-      _next: express.NextFunction
-    ) => {
-      console.error("[Error]", err.message);
-      res.status(500).json({ error: err.message });
-    }
-  );
+  app.use((req, res) => {
+    res.status(404).json({ ok: false, error: "Route not found", path: req.path });
+  });
 
+  app.use((err: HttpError, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const statusCode = Number.isInteger(err.statusCode) ? err.statusCode! : 500;
+    console.error("[RequestError]", { statusCode, message: err.message, requestId: res.getHeader("X-Request-Id") });
+    res.status(statusCode).json({
+      ok: false,
+      error: statusCode >= 500 && process.env.NODE_ENV === "production" ? "Internal server error" : err.message,
+      requestId: res.getHeader("X-Request-Id"),
+    });
+  });
   return app;
 }
 
-// Export allowed origins for logging
-export { allowedOrigins };
+export { allowedOrigins } from "./config/cors";
