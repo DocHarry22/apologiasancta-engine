@@ -49,6 +49,7 @@ import {
   setCountdownSeconds,
 } from "../config/topicSequence";
 import { schedulePersistence } from "../state/persistence";
+import { isQuizAutoStartEnabled, isQuizContinuousEnabled } from "../config/quizRuntime";
 
 /** Phase durations from environment (in seconds) */
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
@@ -364,7 +365,7 @@ function determineNextTopic(currentTopicId: string, roomId: string = DEFAULT_ROO
   const nextTopicId = getNextTopicId(currentTopicId, availableTopics, roomId);
   
   // If series complete, check if we should loop
-  if (!nextTopicId && shouldRepeatSeries(roomId)) {
+  if (!nextTopicId && (isQuizContinuousEnabled() || shouldRepeatSeries(roomId))) {
     console.log(`[Controller] Series loop mode active - restarting from first topic`);
     return getFirstTopicId(availableTopics, roomId);
   }
@@ -423,7 +424,7 @@ function emitCongratsAndScheduleCountdown(
   broadcastEvent(congratsEvent, roomId);
   
   // Schedule countdown after congrats (if auto-advance enabled and next topic exists)
-  if (config.autoAdvance && nextTopicId) {
+  if ((config.autoAdvance || isQuizContinuousEnabled()) && nextTopicId) {
     state.congratsTimer = setTimeout(() => {
       state.inCongrats = false;
       markControllerChanged();
@@ -496,7 +497,9 @@ function emitTopicComplete(roomId: string = DEFAULT_ROOM_ID): void {
     summary: buildTopicSummary(roomId),
     nextTopicId,
     nextTopicTitle: nextTopicId ? topicIdToTitle(nextTopicId) : null,
-    autoAdvanceMs: config.autoAdvance ? (config.congratsDisplayTimeMs + config.countdownSeconds * 1000) : 0,
+    autoAdvanceMs: (config.autoAdvance || isQuizContinuousEnabled()) && nextTopicId
+      ? config.congratsDisplayTimeMs + config.countdownSeconds * 1000
+      : 0,
     isSeriesComplete,
   };
   broadcastEvent(event, roomId);
@@ -577,6 +580,12 @@ function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
   // Check if this was the last question in the topic
   if (isLastQuestion(roomId)) {
     console.log(`[Controller] Last question completed for topic`);
+    if (!getActiveTopicId(roomId) && isQuizContinuousEnabled()) {
+      state.questionIndex = 0;
+      console.log("[Controller] Continuous legacy question loop - restarting from Q1");
+      enterOpenPhase(roomId);
+      return;
+    }
     emitTopicComplete(roomId);
     // Don't advance - wait for topic transition (auto or manual)
     return;
@@ -686,6 +695,59 @@ export function start(roomId: string = DEFAULT_ROOM_ID): void {
 
   // Start with OPEN phase
   enterOpenPhase(roomId);
+}
+
+/**
+ * Apply the deployment runtime policy to one active room. Continuous mode
+ * implies auto-start and resumes a persisted topic transition at the next
+ * topic instead of replaying the completed final question.
+ */
+export function startAutomaticQuizRuntimeForRoom(
+  roomId: string = DEFAULT_ROOM_ID
+): boolean {
+  if (!isQuizAutoStartEnabled()) {
+    return false;
+  }
+
+  const activeRoom = listRooms(false).some((room) => room.roomId === roomId);
+  if (!activeRoom) {
+    return false;
+  }
+
+  const state = getControllerState(roomId);
+  if (isQuizContinuousEnabled() && !getActiveTopicId(roomId)) {
+    const firstTopicId = getFirstTopicId(getAllTopicIds(), roomId);
+    if (firstTopicId) {
+      startNextTopic(firstTopicId, roomId);
+    }
+  }
+
+  if (state.running) {
+    return true;
+  }
+
+  if (isQuizContinuousEnabled() && state.inTopicSummary) {
+    const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
+    const nextTopicId = state.pendingNextTopicId
+      || (currentTopicId ? determineNextTopic(currentTopicId, roomId) : null);
+    if (nextTopicId) {
+      startNextTopic(nextTopicId, roomId);
+    }
+  }
+
+  start(roomId);
+  return true;
+}
+
+/** Start every active room after persisted state has been restored. */
+export function startAutomaticQuizRuntime(): string[] {
+  if (!isQuizAutoStartEnabled()) {
+    return [];
+  }
+
+  return listRooms(false)
+    .filter((room) => startAutomaticQuizRuntimeForRoom(room.roomId))
+    .map((room) => room.roomId);
 }
 
 /**
@@ -826,9 +888,10 @@ export function isInTopicSummary(roomId: string = DEFAULT_ROOM_ID): boolean {
 export function getPendingNextTopic(roomId: string = DEFAULT_ROOM_ID): string | null {
   const state = getControllerState(roomId);
   if (!state.inTopicSummary) return null;
+  if (state.pendingNextTopicId) return state.pendingNextTopicId;
   const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
   if (!currentTopicId) return null;
-  return getNextTopicId(currentTopicId, getAllTopicIds(), roomId);
+  return determineNextTopic(currentTopicId, roomId);
 }
 
 /**

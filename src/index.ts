@@ -14,6 +14,7 @@ import {
 import {
   getControllerPersistenceSnapshot,
   hydrateControllerPersistenceSnapshot,
+  startAutomaticQuizRuntime,
 } from "./engine/roundController";
 import { getScoringMode } from "./engine/scoring";
 import { getPlayersPersistenceSnapshot, hydratePlayersPersistenceSnapshot } from "./state/players";
@@ -88,6 +89,10 @@ async function autoSync() {
     const result = await syncFromGitHub();
     if (result.success) {
       console.log(`[Startup] Synced ${result.questionsLoaded} questions from ${result.topicsLoaded} topics`);
+      const synchronizedRooms = startAutomaticQuizRuntime();
+      if (synchronizedRooms.length > 0) {
+        console.log(`[Startup] Applied automatic quiz runtime after content sync: ${synchronizedRooms.join(", ")}`);
+      }
     } else {
       console.warn(`[Startup] Sync completed with ${result.errors.length} errors`);
       result.errors.forEach((e) => console.warn(`  - ${e}`));
@@ -98,7 +103,13 @@ async function autoSync() {
 }
 
 async function main() {
-  await restorePersistedState();
+  const restored = await restorePersistedState();
+  const automaticRooms = startAutomaticQuizRuntime();
+  if (automaticRooms.length > 0) {
+    console.log(
+      `[Startup] Automatic quiz runtime started for ${automaticRooms.length} room(s) after ${restored ? "persistence restore" : "fresh initialization"}: ${automaticRooms.join(", ")}`
+    );
+  }
 
   const shutdown = async (signal: string) => {
     if (shuttingDown) {
@@ -173,7 +184,11 @@ async function main() {
     console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
     console.log(`[Config] Runtime persistence: ${getPersistenceStatus().driver} @ ${getStatePersistencePath()}`);
     console.log("[Config] Use POST /admin/persistence/save to force a runtime snapshot");
-    console.log(`[Config] Use POST /admin/start to begin the quiz`);
+    console.log(
+      automaticRooms.length > 0
+        ? `[Config] Automatic quiz runtime active for: ${automaticRooms.join(", ")}`
+        : "[Config] Use POST /admin/start to begin the quiz"
+    );
 
     // Auto-sync from GitHub after server starts
     autoSync();

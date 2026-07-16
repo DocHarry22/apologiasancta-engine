@@ -17,6 +17,7 @@ import {
   skipCurrentTopic,
   replayTopic,
   emitTopicCountdown,
+  startAutomaticQuizRuntimeForRoom,
 } from "../engine/roundController";
 import { getPlayerCount } from "../state/players";
 import { getAllTopicIds, topicIdToTitle } from "../content/bank";
@@ -562,9 +563,11 @@ router.post("/rooms", (req: Request, res: Response) => {
 
   try {
     const room = createRoom(name, roomId);
+    const automaticRuntimeStarted = startAutomaticQuizRuntimeForRoom(room.roomId);
     return res.status(201).json({
       success: true,
       room,
+      automaticRuntimeStarted,
     });
   } catch (error) {
     return res.status(400).json({
