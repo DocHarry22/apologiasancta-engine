@@ -88,7 +88,7 @@ export function getAccountIdentityAssertionTtlSeconds(env: NodeJS.ProcessEnv = p
   );
 }
 
-function getClockSkewSeconds(env: NodeJS.ProcessEnv = process.env): number {
+export function getAccountIdentityClockSkewSeconds(env: NodeJS.ProcessEnv = process.env): number {
   return boundedInteger(env.ACCOUNT_IDENTITY_CLOCK_SKEW_SECONDS, DEFAULT_CLOCK_SKEW_SECONDS, 0, MAX_CLOCK_SKEW_SECONDS);
 }
 
@@ -221,7 +221,7 @@ export function verifyAccountIdentityAssertion(
   }
 
   const now = Math.floor(nowMs / 1000);
-  const clockSkew = getClockSkewSeconds(env);
+  const clockSkew = getAccountIdentityClockSkewSeconds(env);
   if (payload.issuedAt > now + clockSkew) return { ok: false, reason: "not_yet_valid" };
   if (payload.expiresAt <= now - clockSkew) return { ok: false, reason: "expired" };
 

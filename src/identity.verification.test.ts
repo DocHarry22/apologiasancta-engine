@@ -222,6 +222,31 @@ test("identity exchange rejects expired, unsafe, and nonce-conflicting assertion
     const conflict = await exchange(server.baseUrl, nonceConflict);
     assert.equal(conflict.response.status, 409);
     assert.equal(conflict.body.reason, "identity_assertion_nonce_reused");
+
+    const graceBoundary = 1_780_100_000_000;
+    const graceNonce = "clock-skew-nonce-000001";
+    const expiringAssertion = signAccountIdentityAssertion({
+      subject: "account-00000006",
+      displayName: "Origen",
+      nonce: graceNonce,
+    }, graceBoundary - 120_000);
+    const acceptedInGrace = await withPatchedNow(
+      graceBoundary,
+      () => exchange(server.baseUrl, expiringAssertion)
+    );
+    assert.equal(acceptedInGrace.response.status, 200);
+
+    const conflictingDuringGrace = signAccountIdentityAssertion({
+      subject: "account-00000006",
+      displayName: "Origen_Changed",
+      nonce: graceNonce,
+    }, graceBoundary + 5_000);
+    const graceConflict = await withPatchedNow(
+      graceBoundary + 5_000,
+      () => exchange(server.baseUrl, conflictingDuringGrace)
+    );
+    assert.equal(graceConflict.response.status, 409);
+    assert.equal(graceConflict.body.reason, "identity_assertion_nonce_reused");
   } finally {
     await server.close();
     await temp.cleanup();

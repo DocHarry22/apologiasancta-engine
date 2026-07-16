@@ -2,6 +2,7 @@ import { Router } from "express";
 import { createRateLimit } from "../middleware/rateLimit";
 import {
   type AccountIdentityAssertionPayload,
+  getAccountIdentityClockSkewSeconds,
   isAccountIdentityConfigured,
   isAccountIdentityEnabled,
   verifyAccountIdentityAssertion,
@@ -30,7 +31,7 @@ interface IdentityExchangeResponse {
 
 interface ReplayEntry {
   fingerprint: string;
-  expiresAt: number;
+  retainUntil: number;
   response?: IdentityExchangeResponse;
 }
 
@@ -58,7 +59,7 @@ const identityExchangeRateLimit = createRateLimit({
 
 function cleanupReplayCache(nowSeconds: number): void {
   for (const [key, entry] of replayCache) {
-    if (entry.expiresAt <= nowSeconds) replayCache.delete(key);
+    if (entry.retainUntil <= nowSeconds) replayCache.delete(key);
   }
   while (replayCache.size >= MAX_REPLAY_CACHE_ENTRIES) {
     const oldestKey = replayCache.keys().next().value as string | undefined;
@@ -205,7 +206,7 @@ router.post("/exchange", identityExchangeRateLimit, async (req, res) => {
 
   replayCache.set(replayKey, {
     fingerprint: verification.fingerprint,
-    expiresAt: verification.payload.expiresAt,
+    retainUntil: verification.payload.expiresAt + getAccountIdentityClockSkewSeconds(),
   });
   const promise = exchangeAccountIdentity(verification.payload);
   pendingExchanges.set(replayKey, { fingerprint: verification.fingerprint, promise });
@@ -214,7 +215,7 @@ router.post("/exchange", identityExchangeRateLimit, async (req, res) => {
     if (result.body.ok) {
       replayCache.set(replayKey, {
         fingerprint: verification.fingerprint,
-        expiresAt: verification.payload.expiresAt,
+        retainUntil: verification.payload.expiresAt + getAccountIdentityClockSkewSeconds(),
         response: result.body,
       });
     }
