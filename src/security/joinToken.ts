@@ -18,14 +18,48 @@ export type JoinTokenVerification =
 const DEFAULT_TTL_SECONDS = 6 * 60 * 60;
 const MIN_TTL_SECONDS = 5 * 60;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
+const MIN_PRODUCTION_SECRET_BYTES = 32;
 const DEVELOPMENT_SECRET = "apologia-sancta-local-join-token-secret";
+
+export type ProductionJoinSecretValidation =
+  | { ok: true }
+  | { ok: false; reason: "missing" | "placeholder" | "too_short" };
+
+const PLACEHOLDER_PATTERNS = [
+  /^replace-with-/i,
+  /^your-(?:secure-)?player-join-secret$/i,
+  /^(?:change-?me|changeme|placeholder)$/i,
+  /^apologia-sancta-local-join-token-secret$/i,
+];
+
+function isPlaceholderSecret(value: string): boolean {
+  return PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+export function validateProductionJoinSecret(value: string | null | undefined): ProductionJoinSecretValidation {
+  const configured = value?.trim();
+  if (!configured) return { ok: false, reason: "missing" };
+  if (isPlaceholderSecret(configured)) return { ok: false, reason: "placeholder" };
+  if (Buffer.byteLength(configured, "utf8") < MIN_PRODUCTION_SECRET_BYTES) {
+    return { ok: false, reason: "too_short" };
+  }
+  return { ok: true };
+}
+
+export function assertProductionJoinSecret(value = process.env.PLAYER_JOIN_SECRET): void {
+  const validation = validateProductionJoinSecret(value);
+  if (!validation.ok) {
+    throw new Error("PLAYER_JOIN_SECRET must contain at least 32 random bytes and must not be a placeholder");
+  }
+}
 
 function getSecret(): string {
   const configured = process.env.PLAYER_JOIN_SECRET?.trim();
-  if (configured && configured !== "replace-with-join-secret") return configured;
   if (process.env.NODE_ENV === "production") {
-    throw new Error("PLAYER_JOIN_SECRET is required in production");
+    assertProductionJoinSecret(configured);
+    return configured!;
   }
+  if (configured && !isPlaceholderSecret(configured)) return configured;
   return DEVELOPMENT_SECRET;
 }
 
@@ -62,7 +96,8 @@ function isJoinTokenPayload(value: unknown): value is JoinTokenPayload {
 
 export function isJoinTokenConfigured(): boolean {
   const configured = process.env.PLAYER_JOIN_SECRET?.trim();
-  return Boolean(configured && configured !== "replace-with-join-secret");
+  if (process.env.NODE_ENV === "production") return validateProductionJoinSecret(configured).ok;
+  return Boolean(configured && !isPlaceholderSecret(configured));
 }
 
 export function signJoinToken(roomId: string, userId: string, displayName: string, nowMs = Date.now()): string {

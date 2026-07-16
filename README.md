@@ -6,7 +6,7 @@ Deployed on Render: `https://apologiasancta-engine.onrender.com`
 
 ## Operational security update (July 2026)
 
-The production blueprint now uses PostgreSQL atomic runtime snapshots and no longer provisions an unused Redis service. Player registration issues an HMAC-signed, expiring room token; join, leave, rename and answer routes enforce that identity, while expired signed sessions may be refreshed by rejoining. Production also has strict origin resolution, request/player rate limits, request IDs, bounded bodies and a non-secret `/diagnostics` readiness endpoint.
+The production blueprint now uses PostgreSQL atomic runtime snapshots and no longer provisions an unused Redis service. Player registration issues an HMAC-signed, expiring room token; join, leave, rename and answer routes enforce that identity, while expired signed sessions may be refreshed by rejoining. Production rejects placeholder player secrets and requires at least 32 random bytes. It also has strict origin resolution, classroom-safe configurable registration limits, request IDs, bounded bodies and a non-secret `/diagnostics` readiness endpoint.
 
 `ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Configure the latter on Render before deploying this branch. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
 
@@ -23,18 +23,18 @@ The engine is live on Render and serving production traffic. All core game mecha
 - Daily, weekly, and all-time leaderboard windows
 - YouTube Live Chat polling for `!A` / `!B` / `!C` / `!D` answers
 - Restart recovery restoring the checkpoint in **paused** mode (no mid-round auto-resume)
-- Runtime persistence: JSON-file (default) and experimental SQLite backend (`STATE_PERSISTENCE_DRIVER=sqlite`)
+- Runtime persistence: JSON-file, SQLite and managed PostgreSQL snapshot drivers
 - CI pipeline on GitHub Actions: Node 22 typecheck, tests, and build on every push
 
 **Known limitations:**
-- Topic-flow sequencing is still **shared engine-wide** — per-room topic progression isolation is not yet complete
-- Postgres and Redis production adapters are scaffolded in `render.yaml` but not yet wired into live state management; the engine runs on a single Render instance using file-backed persistence
+- Controllers, topic sequences, active pools and phase timers are room-scoped. The SSE broker, rate limits and process orchestration remain instance-local, so production currently supports one engine instance.
+- PostgreSQL stores one atomic whole-runtime snapshot rather than normalized quiz-session and answer records; it is restart-durable but not a multi-instance analytics model.
 - SQLite backend emits a Node experimental warning on Node 22
 
 ## Future Goals
 
-- **Per-room topic flow** — isolate topic-sequence ordering and repeat counters per room so rooms can run independent question tracks simultaneously
-- **Postgres/Redis runtime adapters** — wire the provisioned Render Postgres and Redis services into the persistence and SSE layers to enable multi-instance horizontal scaling
+- **Distributed room orchestration** — add a shared event bus and room locks before enabling multiple engine instances
+- **Normalized competition records** — persist quiz sessions, answers and leaderboard events for seasons, analytics and accountable moderation
 - **Nonce-based CSP** — eliminate `unsafe-inline` from script delivery once Next.js nonce support is stable
 - **Signed APK CI pipeline** — verify and enable the GitHub Actions signed APK/AAB release workflow end-to-end
 - **Graceful drain** — allow in-flight SSE connections to complete before a Render deployment replaces the instance
@@ -102,8 +102,13 @@ ALLOW_LOCAL_ORIGINS=false
 # Admin
 ADMIN_TOKEN=your-secure-admin-token
 
-# Public player room sessions (use a different high-entropy value)
-PLAYER_JOIN_SECRET=your-secure-player-join-secret
+# Public player room sessions. Leave blank locally; production must inject a
+# value containing at least 32 random bytes from the provider secret manager.
+PLAYER_JOIN_SECRET=
+
+# Classroom-safe registration defaults; tune upward for larger events.
+RATE_LIMIT_REGISTER_MAX=120
+RATE_LIMIT_REGISTER_WINDOW_MS=600000
 
 # YouTube integration (optional)
 YOUTUBE_API_KEY=AIza...your_key
@@ -216,7 +221,7 @@ All admin endpoints require the `x-admin-token` header.
 
 ### Topic and countdown controls
 
-Both engine-wide and room-scoped variants exist for:
+Both default-global-room and explicit room-scoped variants exist for:
 
 - topic start / next / skip / replay / countdown
 - topic sequence reads and updates

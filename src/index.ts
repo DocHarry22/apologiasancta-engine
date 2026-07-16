@@ -26,6 +26,7 @@ import {
 } from "./state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
 import { stopRateLimitCleanup } from "./routes/register";
+import { assertProductionJoinSecret } from "./security/joinToken";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -34,10 +35,11 @@ const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
 
 if (process.env.NODE_ENV === "production") {
-  const missing = ["ADMIN_TOKEN", "PLAYER_JOIN_SECRET"].filter((name) => !process.env[name]?.trim());
+  const missing = ["ADMIN_TOKEN"].filter((name) => !process.env[name]?.trim());
   if (missing.length > 0) {
     throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
   }
+  assertProductionJoinSecret();
 }
 
 let server: Server | null = null;

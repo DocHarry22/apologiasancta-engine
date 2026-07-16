@@ -1,8 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { answerRateLimit, processAnswer } from "./answer";
-import { handleRegister } from "./register";
+import { handleRegister, registrationRateLimit } from "./register";
 import { getAnswerWindowStatus } from "../engine/roundController";
-import { createRateLimit } from "../middleware/rateLimit";
 import { requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
 import { addClient, removeClient } from "../sse/broker";
@@ -12,12 +11,6 @@ import { getRoom, isGameplayRoomSupported, isPlayerInRoom, joinRoom, leaveRoom, 
 import type { LeaderboardPeriod } from "../types/quiz";
 
 const router = Router();
-const roomRegistrationRateLimit = createRateLimit({
-  name: "ROOM_REGISTER",
-  max: 10,
-  windowMs: 10 * 60 * 1000,
-  message: "Too many room registration attempts. Try again later.",
-});
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] ?? "" : value;
@@ -106,7 +99,7 @@ router.get("/:roomId/events", (req, res) => {
   req.on("close", () => removeClient(clientId));
 });
 
-router.post("/:roomId/register", roomRegistrationRateLimit, (req, res) => handleRegister(req, res, routeParam(req.params.roomId)));
+router.post("/:roomId/register", registrationRateLimit, (req, res) => handleRegister(req, res, routeParam(req.params.roomId)));
 router.post("/:roomId/answer", answerRateLimit, (req, res) => processAnswer(req, res, routeParam(req.params.roomId)));
 
 router.get("/:roomId/answer-window", (req, res) => {

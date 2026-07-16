@@ -12,8 +12,13 @@ import {
   submitAnswerForRegistered,
 } from "./state/players";
 import { createRoom, getRoom, joinRoom } from "./state/rooms";
-import { signJoinToken, verifyJoinToken } from "./security/joinToken";
+import { signJoinToken, validateProductionJoinSecret, verifyJoinToken } from "./security/joinToken";
 import { resolveAllowedOrigins } from "./config/cors";
+import { resolveRateLimitSettings } from "./middleware/rateLimit";
+import {
+  DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+  DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
+} from "./routes/register";
 import {
   flushPersistence,
   getPersistenceStatus,
@@ -587,6 +592,51 @@ test("join tokens are signed, room-scoped, tamper-evident, and expiring", () => 
   const expired = verifyJoinToken(token, issuedAtMs + 25 * 60 * 60 * 1000);
   assert.equal(expired.ok, false);
   assert.equal(expired.reason, "expired");
+});
+
+test("production join secrets reject documented placeholders and require 32 bytes", () => {
+  const documentedPlaceholders = [
+    "replace-with-join-secret",
+    "replace-with-32-byte-random-secret",
+    "your-secure-player-join-secret",
+    "apologia-sancta-local-join-token-secret",
+    "change-me",
+    "placeholder",
+  ];
+
+  for (const value of documentedPlaceholders) {
+    assert.deepEqual(validateProductionJoinSecret(value), { ok: false, reason: "placeholder" });
+  }
+  assert.deepEqual(validateProductionJoinSecret(undefined), { ok: false, reason: "missing" });
+  assert.deepEqual(validateProductionJoinSecret("a".repeat(31)), { ok: false, reason: "too_short" });
+  assert.deepEqual(validateProductionJoinSecret("a".repeat(32)), { ok: true });
+  assert.deepEqual(validateProductionJoinSecret("é".repeat(16)), { ok: true });
+});
+
+test("registration rate limits use a classroom-safe default and environment overrides", () => {
+  assert.equal(DEFAULT_REGISTRATION_RATE_LIMIT_MAX, 120);
+  assert.equal(DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS, 600_000);
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", {
+      max: DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+      windowMs: DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
+    }, {}),
+    { max: 120, windowMs: 600_000 }
+  );
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", { max: 120, windowMs: 600_000 }, {
+      RATE_LIMIT_REGISTER_MAX: "250",
+      RATE_LIMIT_REGISTER_WINDOW_MS: "300000",
+    }),
+    { max: 250, windowMs: 300_000 }
+  );
+  assert.deepEqual(
+    resolveRateLimitSettings("REGISTER", { max: 120, windowMs: 600_000 }, {
+      RATE_LIMIT_REGISTER_MAX: "0",
+      RATE_LIMIT_REGISTER_WINDOW_MS: "invalid",
+    }),
+    { max: 120, windowMs: 600_000 }
+  );
 });
 
 test("production CORS excludes localhost unless it is explicitly enabled", () => {

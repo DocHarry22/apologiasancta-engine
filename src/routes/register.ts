@@ -14,10 +14,13 @@ import {
 import { DEFAULT_ROOM_ID, getPlayerRooms, isGameplayRoomSupported, joinRoom, requireRoom } from "../state/rooms";
 
 const router = Router();
-const registrationRateLimit = createRateLimit({
+export const DEFAULT_REGISTRATION_RATE_LIMIT_MAX = 120;
+export const DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
+export const registrationRateLimit = createRateLimit({
   name: "REGISTER",
-  max: 10,
-  windowMs: 10 * 60 * 1000,
+  max: DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
+  windowMs: DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
   message: "Too many registration attempts. Try again later.",
 });
 

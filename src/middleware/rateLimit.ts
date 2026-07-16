@@ -9,11 +9,24 @@ type RateLimitOptions = {
   key?: (req: Request) => string;
 };
 
+export type RateLimitSettings = { max: number; windowMs: number };
+
 const cleanupTimers = new Set<NodeJS.Timeout>();
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function resolveRateLimitSettings(
+  name: string,
+  defaults: RateLimitSettings,
+  env: NodeJS.ProcessEnv = process.env
+): RateLimitSettings {
+  return {
+    max: positiveInteger(env[`RATE_LIMIT_${name}_MAX`], defaults.max),
+    windowMs: positiveInteger(env[`RATE_LIMIT_${name}_WINDOW_MS`], defaults.windowMs),
+  };
 }
 
 function clientKey(req: Request): string {
@@ -22,8 +35,7 @@ function clientKey(req: Request): string {
 
 export function createRateLimit(options: RateLimitOptions): RequestHandler {
   const store = new Map<string, RateLimitEntry>();
-  const max = positiveInteger(process.env[`RATE_LIMIT_${options.name}_MAX`], options.max);
-  const windowMs = positiveInteger(process.env[`RATE_LIMIT_${options.name}_WINDOW_MS`], options.windowMs);
+  const { max, windowMs } = resolveRateLimitSettings(options.name, options);
   const timer = setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of store) if (entry.resetAt <= now) store.delete(key);
