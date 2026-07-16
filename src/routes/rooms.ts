@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { answerRateLimit, processAnswer } from "./answer";
 import { handleRegister, registrationRateLimit } from "./register";
 import { getAnswerWindowStatus } from "../engine/roundController";
-import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
 import { addClient, removeClient } from "../sse/broker";
 import { getPlayer, getLeaderboardForPeriod, initializePlayerRoom, isRegistered } from "../state/players";
@@ -56,6 +56,13 @@ router.post("/:roomId/join", (req: Request<{ roomId: string }>, res) => {
   if (!authorization) return;
   const player = getPlayer(userId);
   if (!player) return res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
+  if (isExpiredJoinTokenPayload(authorization) && authorization.displayName !== player.username) {
+    return res.status(401).json({
+      ok: false,
+      reason: "join_token_expired",
+      error: "Your room session expired. Rejoin with the same display name or sign in again.",
+    });
+  }
   initializePlayerRoom(userId, room.roomId);
   const membership = joinRoom(room.roomId, userId);
   return res.json({

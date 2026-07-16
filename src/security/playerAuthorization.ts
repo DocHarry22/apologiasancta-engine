@@ -8,6 +8,10 @@ function extractBearerToken(req: Request): string | undefined {
   return typeof body?.joinToken === "string" ? body.joinToken : undefined;
 }
 
+export function isExpiredJoinTokenPayload(payload: JoinTokenPayload, nowMs = Date.now()): boolean {
+  return payload.expiresAt <= Math.floor(nowMs / 1000);
+}
+
 export function requirePlayerAuthorization(
   req: Request,
   res: Response,

@@ -27,6 +27,7 @@ import {
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./state/rooms";
 import { stopRateLimitCleanup } from "./routes/register";
 import { assertProductionJoinSecret } from "./security/joinToken";
+import { assertAccountIdentityConfiguration } from "./security/accountIdentity";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -40,6 +41,7 @@ if (process.env.NODE_ENV === "production") {
     throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
   }
   assertProductionJoinSecret();
+  assertAccountIdentityConfiguration();
 }
 
 let server: Server | null = null;

@@ -20,6 +20,16 @@ services:
         sync: false
       - key: PLAYER_JOIN_SECRET
         sync: false
+      - key: ACCOUNT_IDENTITY_ENABLED
+        value: "false"
+      - key: ACCOUNT_IDENTITY_SECRET
+        sync: false
+      - key: ACCOUNT_IDENTITY_ISSUER
+        value: apologia-ui
+      - key: ACCOUNT_IDENTITY_ASSERTION_TTL_SECONDS
+        value: "120"
+      - key: ACCOUNT_IDENTITY_CLOCK_SKEW_SECONDS
+        value: "15"
       - key: CORS_ORIGINS
         value: https://sandybrown-bear-488955.hostingersite.com
       - key: ALLOW_LOCAL_ORIGINS

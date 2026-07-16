@@ -8,6 +8,7 @@ import contentAdminRouter from "./routes/content";
 import diagnosticsRouter from "./routes/diagnostics";
 import eventsRouter from "./routes/events";
 import healthRouter from "./routes/health";
+import identityRouter from "./routes/identity";
 import leaderboardRouter from "./routes/leaderboard";
 import registerRouter from "./routes/register";
 import { adminReleasesRouter, releasesRouter } from "./routes/releases";
@@ -49,6 +50,7 @@ export function createApp(): express.Application {
 
   app.use("/health", healthRouter);
   app.use("/diagnostics", diagnosticsRouter);
+  app.use("/identity", identityRouter);
   app.use("/state", stateRouter);
   app.use("/events", eventsRouter);
   app.use("/answer", answerRouter);
@@ -69,6 +71,7 @@ export function createApp(): express.Application {
       endpoints: {
         health: "GET /health",
         diagnostics: "GET /diagnostics",
+        accountIdentity: "POST /identity/exchange",
         state: "GET /state?roomId=...",
         events: "GET /events?roomId=...&userId=...",
         answer: "POST /answer",

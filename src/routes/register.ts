@@ -1,7 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import { createRateLimit, stopRateLimitCleanup } from "../middleware/rateLimit";
-import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
+import { normalizePublicDisplayName } from "../security/publicDisplayName";
 import {
   getPlayer,
   getPlayerInfo,
@@ -65,6 +66,18 @@ export function handleRegister(req: Request, res: Response, roomId: string): voi
       allowExpired: true,
     });
     if (!authorization) return;
+    if (isExpiredJoinTokenPayload(authorization)) {
+      const currentPlayer = getPlayer(body.userId);
+      const requestedName = normalizePublicDisplayName(body.username);
+      if (!currentPlayer || authorization.displayName !== currentPlayer.username || requestedName !== currentPlayer.username) {
+        res.status(401).json({
+          ok: false,
+          reason: "join_token_expired",
+          error: "Your room session expired. Rejoin with the same display name or sign in again.",
+        });
+        return;
+      }
+    }
     authorizedUserId = body.userId;
   }
 
@@ -89,7 +102,7 @@ function handleMe(req: Request, res: Response, roomId: string): void {
     res.status(400).json({ ok: false, reason: "missing_user_id", error: "userId is required" });
     return;
   }
-  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true, allowExpired: true });
+  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true });
   if (!authorization) return;
   const player = getPlayer(userId);
   if (!player) {
@@ -133,7 +146,7 @@ function handleRename(req: Request, res: Response, roomId: string): void {
     res.status(400).json({ ok: false, reason: "invalid_format", error: "userId and newUsername are required" });
     return;
   }
-  const authorization = requirePlayerAuthorization(req, res, { userId: body.userId, allowDifferentRoom: true, allowExpired: true });
+  const authorization = requirePlayerAuthorization(req, res, { userId: body.userId, allowDifferentRoom: true });
   if (!authorization) return;
   if (!getPlayer(body.userId)) {
     res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
