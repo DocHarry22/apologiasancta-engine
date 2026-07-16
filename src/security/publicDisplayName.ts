@@ -7,4 +7,3 @@ export function normalizePublicDisplayName(raw: string): string {
 export function isValidPublicDisplayName(value: string): boolean {
   return PUBLIC_DISPLAY_NAME_PATTERN.test(value);
 }
-
