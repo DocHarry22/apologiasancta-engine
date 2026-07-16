@@ -20,6 +20,7 @@ const MIN_TTL_SECONDS = 5 * 60;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
 const MIN_PRODUCTION_SECRET_BYTES = 32;
 const DEVELOPMENT_SECRET = "apologia-sancta-local-join-token-secret";
+const BASE64URL_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 export type ProductionJoinSecretValidation =
   | { ok: true }
@@ -119,21 +120,32 @@ export function verifyJoinToken(token: string | null | undefined, nowMs = Date.n
   if (!token) return { ok: false, reason: "missing" };
   const parts = token.split(".");
   if (parts.length !== 2 || !parts[0] || !parts[1]) return { ok: false, reason: "malformed" };
-
-  let receivedSignature: Buffer;
-  try {
-    receivedSignature = Buffer.from(parts[1], "base64url");
-  } catch {
+  if (!BASE64URL_PATTERN.test(parts[0]) || !BASE64URL_PATTERN.test(parts[1])) {
     return { ok: false, reason: "malformed" };
   }
-  const expectedSignature = signatureFor(parts[0]);
+
+  let expectedSignature: Buffer;
+  try {
+    // Compare the canonical base64url encodings, not only their decoded bytes.
+    // Base64's unused trailing bits otherwise allow multiple text spellings of
+    // the same HMAC, which makes a token appear tamperable even though the bytes
+    // still compare equal.
+    expectedSignature = Buffer.from(signatureFor(parts[0]).toString("base64url"), "ascii");
+  } catch {
+    return { ok: false, reason: "invalid_signature" };
+  }
+  const receivedSignature = Buffer.from(parts[1], "ascii");
   if (receivedSignature.length !== expectedSignature.length || !timingSafeEqual(receivedSignature, expectedSignature)) {
     return { ok: false, reason: "invalid_signature" };
   }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    const payloadBytes = Buffer.from(parts[0], "base64url");
+    if (payloadBytes.toString("base64url") !== parts[0]) {
+      return { ok: false, reason: "malformed" };
+    }
+    payload = JSON.parse(payloadBytes.toString("utf8"));
   } catch {
     return { ok: false, reason: "malformed" };
   }

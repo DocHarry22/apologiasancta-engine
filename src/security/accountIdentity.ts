@@ -201,26 +201,24 @@ export function verifyAccountIdentityAssertion(
     return { ok: false, reason: "malformed" };
   }
 
-  let receivedSignature: Buffer;
-  try {
-    receivedSignature = Buffer.from(parts[1], "base64url");
-  } catch {
-    return { ok: false, reason: "malformed" };
-  }
-
   let expectedSignature: Buffer;
   try {
-    expectedSignature = signatureFor(parts[0], env);
+    expectedSignature = Buffer.from(signatureFor(parts[0], env).toString("base64url"), "ascii");
   } catch {
     return { ok: false, reason: "invalid_signature" };
   }
+  const receivedSignature = Buffer.from(parts[1], "ascii");
   if (receivedSignature.length !== expectedSignature.length || !timingSafeEqual(receivedSignature, expectedSignature)) {
     return { ok: false, reason: "invalid_signature" };
   }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    const payloadBytes = Buffer.from(parts[0], "base64url");
+    if (payloadBytes.toString("base64url") !== parts[0]) {
+      return { ok: false, reason: "malformed" };
+    }
+    payload = JSON.parse(payloadBytes.toString("utf8"));
   } catch {
     return { ok: false, reason: "malformed" };
   }

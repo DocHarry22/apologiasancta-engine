@@ -676,6 +676,21 @@ test("join tokens are signed, room-scoped, tamper-evident, and expiring", () => 
   const [payload, signature] = token.split(".");
   const tampered = `${payload}.${signature.slice(0, -1)}${signature.endsWith("a") ? "b" : "a"}`;
   assert.deepEqual(verifyJoinToken(tampered, issuedAtMs + 1000), { ok: false, reason: "invalid_signature" });
+
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const lastIndex = alphabet.indexOf(signature.at(-1)!);
+  assert.equal(lastIndex % 4, 0, "a 256-bit HMAC has two zero padding bits in its final base64url character");
+  const nonCanonicalSignature = `${signature.slice(0, -1)}${alphabet[lastIndex + 1]}`;
+  assert.deepEqual(
+    Buffer.from(nonCanonicalSignature, "base64url"),
+    Buffer.from(signature, "base64url"),
+    "the regression input must decode to the original HMAC bytes"
+  );
+  assert.deepEqual(
+    verifyJoinToken(`${payload}.${nonCanonicalSignature}`, issuedAtMs + 1000),
+    { ok: false, reason: "invalid_signature" }
+  );
+
   const expired = verifyJoinToken(token, issuedAtMs + 25 * 60 * 60 * 1000);
   assert.equal(expired.ok, false);
   assert.equal(expired.reason, "expired");
