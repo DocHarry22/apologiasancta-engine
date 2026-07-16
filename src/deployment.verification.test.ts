@@ -26,6 +26,14 @@ test("continuous mode implies automatic startup while explicit flags remain stri
   assert.equal(isQuizAutoStartEnabled({ QUIZ_AUTO_START: "true" }), true);
   assert.equal(isQuizAutoStartEnabled({ QUIZ_AUTO_START: "1" }), false);
   assert.equal(isQuizContinuousEnabled({ QUIZ_CONTINUOUS: "false" }), false);
+  assert.equal(isQuizContinuousEnabled({ NODE_ENV: "production" }), true);
+  assert.equal(isQuizAutoStartEnabled({ NODE_ENV: "production" }), true);
+  assert.equal(isQuizContinuousEnabled({ NODE_ENV: "development" }), false);
+  assert.equal(isQuizAutoStartEnabled({
+    NODE_ENV: "production",
+    QUIZ_CONTINUOUS: "false",
+    QUIZ_AUTO_START: "false",
+  }), false);
 });
 
 test("environment examples never provide a copyable player-secret placeholder", async () => {
