@@ -20,6 +20,7 @@ import {
   getActiveTopicId,
   topicIdToTitle,
   getAllTopicIds,
+  getTopicQuestions,
   setActivePoolForRoom,
 } from "../content/bank";
 import { getScoringMode } from "./scoring";
@@ -36,7 +37,7 @@ import {
   clearAllAnswers,
 } from "../state/players";
 import { broadcast, broadcastEvent, getClientCount, getClientCountForRoom } from "../sse/broker";
-import { DEFAULT_ROOM_ID, listRooms } from "../state/rooms";
+import { DEFAULT_ROOM_ID, isGameplayRoomSupported, listRooms } from "../state/rooms";
 import {
   getTopicSequenceConfig,
   getNextTopicId,
@@ -80,6 +81,8 @@ function getTotalQuestions(roomId: string = DEFAULT_ROOM_ID): number {
 
 /** Controller state */
 interface ControllerState {
+  /** Invalidates callbacks captured before a room is stopped/disposed. */
+  lifecycleRevision: number;
   running: boolean;
   questionIndex: number;
   phase: QuizPhase;
@@ -122,6 +125,7 @@ export interface PersistedControllerSnapshot {
 
 function createControllerState(): ControllerState {
   return {
+    lifecycleRevision: 0,
     running: false,
     questionIndex: 0,
     phase: "OPEN",
@@ -140,6 +144,15 @@ function createControllerState(): ControllerState {
 }
 
 const controllerStates: Map<string, ControllerState> = new Map();
+let runtimeStartsHeld = false;
+
+export function holdQuizRuntimeStarts(): void {
+  runtimeStartsHeld = true;
+}
+
+export function releaseQuizRuntimeStarts(): void {
+  runtimeStartsHeld = false;
+}
 
 function getControllerState(roomId: string = DEFAULT_ROOM_ID): ControllerState {
   let state = controllerStates.get(roomId);
@@ -228,6 +241,19 @@ function markControllerChanged(): void {
   schedulePersistence();
 }
 
+function isCurrentControllerCallback(
+  roomId: string,
+  state: ControllerState,
+  lifecycleRevision: number,
+  requireRunning = false
+): boolean {
+  const currentState = controllerStates.get(roomId);
+  return currentState === state
+    && state.lifecycleRevision === lifecycleRevision
+    && isGameplayRoomSupported(roomId)
+    && (!requireRunning || state.running);
+}
+
 /**
  * Clear the current timer
  */
@@ -245,7 +271,14 @@ function clearTimer(roomId: string = DEFAULT_ROOM_ID): void {
 function scheduleNextPhase(roomId: string, delayMs: number, callback: () => void): void {
   const state = getControllerState(roomId);
   clearTimer(roomId);
-  state.timer = setTimeout(callback, delayMs);
+  const lifecycleRevision = state.lifecycleRevision;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (!isCurrentControllerCallback(roomId, state, lifecycleRevision, true)) {
+      return;
+    }
+    callback();
+  }, delayMs);
 }
 
 /**
@@ -253,6 +286,9 @@ function scheduleNextPhase(roomId: string, delayMs: number, callback: () => void
  */
 function enterOpenPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
+  if (!state.running || !isGameplayRoomSupported(roomId)) {
+    return;
+  }
   state.phase = "OPEN";
   state.openStartMs = Date.now();
   state.endsAtMs = state.openStartMs + OPEN_SECONDS * 1000;
@@ -271,6 +307,9 @@ function enterOpenPhase(roomId: string = DEFAULT_ROOM_ID): void {
  */
 function enterLockedPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
+  if (!state.running || !isGameplayRoomSupported(roomId)) {
+    return;
+  }
   state.phase = "LOCKED";
   state.endsAtMs = Date.now() + LOCK_SECONDS * 1000;
   markControllerChanged();
@@ -286,6 +325,9 @@ function enterLockedPhase(roomId: string = DEFAULT_ROOM_ID): void {
  */
 function enterRevealPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
+  if (!state.running || !isGameplayRoomSupported(roomId)) {
+    return;
+  }
   // Evaluate answers before revealing
   const questionData = getQuestion(state.questionIndex, roomId);
   evaluateAnswers(
@@ -425,7 +467,12 @@ function emitCongratsAndScheduleCountdown(
   
   // Schedule countdown after congrats (if auto-advance enabled and next topic exists)
   if ((config.autoAdvance || isQuizContinuousEnabled()) && nextTopicId) {
+    const lifecycleRevision = state.lifecycleRevision;
     state.congratsTimer = setTimeout(() => {
+      state.congratsTimer = null;
+      if (!isCurrentControllerCallback(roomId, state, lifecycleRevision)) {
+        return;
+      }
       state.inCongrats = false;
       markControllerChanged();
       emitCountdownForTopic(nextTopicId, roomId);
@@ -456,7 +503,12 @@ function emitCountdownForTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
   broadcastEvent(event, roomId);
   
   // Schedule topic start after countdown
+  const lifecycleRevision = state.lifecycleRevision;
   state.countdownTimer = setTimeout(() => {
+    state.countdownTimer = null;
+    if (!isCurrentControllerCallback(roomId, state, lifecycleRevision)) {
+      return;
+    }
     state.inCountdown = false;
     markControllerChanged();
     startNextTopic(topicId, roomId);
@@ -523,7 +575,15 @@ function clearTopicTransitionTimer(roomId: string = DEFAULT_ROOM_ID): void {
 /**
  * Start the next topic in sequence
  */
-export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): void {
+export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): boolean {
+  if (!isGameplayRoomSupported(roomId)) {
+    console.log(`[Controller] Ignoring topic start for inactive room: ${roomId}`);
+    return false;
+  }
+  if (getTopicQuestions(topicId).length === 0) {
+    console.error(`[Controller] No questions found for topic: ${topicId}; preserving current room state`);
+    return false;
+  }
   const state = getControllerState(roomId);
   console.log(`[Controller] Starting next topic: ${topicId}`);
   
@@ -545,7 +605,7 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
   
   if (poolSize === 0) {
     console.error(`[Controller] No questions found for topic: ${topicId}`);
-    return;
+    return false;
   }
   
   // Reset to first question
@@ -566,6 +626,7 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
     // Broadcast current state so UI updates
     broadcastState(roomId);
   }
+  return true;
 }
 
 /**
@@ -574,6 +635,9 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
  */
 function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
+  if (!state.running || !isGameplayRoomSupported(roomId)) {
+    return;
+  }
   // Clear answers for the completed question
   clearAnswersForQuestion(state.questionIndex, roomId);
 
@@ -682,11 +746,19 @@ export function getQuestionIndex(roomId: string = DEFAULT_ROOM_ID): number {
 /**
  * Start the controller loop
  */
-export function start(roomId: string = DEFAULT_ROOM_ID): void {
+export function start(roomId: string = DEFAULT_ROOM_ID): boolean {
+  if (runtimeStartsHeld) {
+    console.log(`[Controller] Runtime startup is still initializing; start deferred for room ${roomId}`);
+    return false;
+  }
+  if (!isGameplayRoomSupported(roomId)) {
+    console.log(`[Controller] Cannot start inactive room: ${roomId}`);
+    return false;
+  }
   const state = getControllerState(roomId);
   if (state.running) {
     console.log("[Controller] Already running");
-    return;
+    return true;
   }
 
   state.running = true;
@@ -695,6 +767,26 @@ export function start(roomId: string = DEFAULT_ROOM_ID): void {
 
   // Start with OPEN phase
   enterOpenPhase(roomId);
+  return true;
+}
+
+function resolveAutomaticNextTopic(state: ControllerState, roomId: string): string | null {
+  const availableTopics = getAllTopicIds();
+  const availableSet = new Set(availableTopics);
+  if (state.pendingNextTopicId && availableSet.has(state.pendingNextTopicId)) {
+    return state.pendingNextTopicId;
+  }
+
+  const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
+  const determinedTopicId = currentTopicId
+    ? determineNextTopic(currentTopicId, roomId)
+    : null;
+  if (determinedTopicId && availableSet.has(determinedTopicId)) {
+    return determinedTopicId;
+  }
+
+  const firstTopicId = getFirstTopicId(availableTopics, roomId);
+  return firstTopicId && availableSet.has(firstTopicId) ? firstTopicId : null;
 }
 
 /**
@@ -705,7 +797,7 @@ export function start(roomId: string = DEFAULT_ROOM_ID): void {
 export function startAutomaticQuizRuntimeForRoom(
   roomId: string = DEFAULT_ROOM_ID
 ): boolean {
-  if (!isQuizAutoStartEnabled()) {
+  if (runtimeStartsHeld || !isQuizAutoStartEnabled()) {
     return false;
   }
 
@@ -715,10 +807,29 @@ export function startAutomaticQuizRuntimeForRoom(
   }
 
   const state = getControllerState(roomId);
+  if (state.inTopicSummary && !isQuizContinuousEnabled()) {
+    console.log(`[Controller] Preserving completed summary for room ${roomId} until an admin selects the next topic`);
+    return false;
+  }
+  if (state.inTopicSummary) {
+    const nextTopicId = resolveAutomaticNextTopic(state, roomId);
+    if (!nextTopicId) {
+      console.warn(
+        `[Controller] No valid topic remains for room ${roomId}; preserving paused final summary`
+      );
+      return false;
+    }
+    if (!startNextTopic(nextTopicId, roomId)) {
+      return false;
+    }
+  }
+
   if (isQuizContinuousEnabled() && !getActiveTopicId(roomId)) {
     const firstTopicId = getFirstTopicId(getAllTopicIds(), roomId);
     if (firstTopicId) {
-      startNextTopic(firstTopicId, roomId);
+      if (!startNextTopic(firstTopicId, roomId)) {
+        return false;
+      }
     }
   }
 
@@ -726,17 +837,7 @@ export function startAutomaticQuizRuntimeForRoom(
     return true;
   }
 
-  if (isQuizContinuousEnabled() && state.inTopicSummary) {
-    const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
-    const nextTopicId = state.pendingNextTopicId
-      || (currentTopicId ? determineNextTopic(currentTopicId, roomId) : null);
-    if (nextTopicId) {
-      startNextTopic(nextTopicId, roomId);
-    }
-  }
-
-  start(roomId);
-  return true;
+  return start(roomId);
 }
 
 /** Start every active room after persisted state has been restored. */
@@ -765,6 +866,39 @@ export function pause(roomId: string = DEFAULT_ROOM_ID): void {
   state.endsAtMs = 0;
   markControllerChanged();
   console.log("[Controller] Paused");
+}
+
+/**
+ * Permanently stop a room controller for the current room lifecycle.
+ *
+ * This does not schedule persistence itself; the room-close mutation schedules
+ * the single snapshot that captures both the inactive room and stopped
+ * controller. Incrementing the revision also makes a callback that was already
+ * queued before clearTimeout a no-op.
+ */
+export function disposeRoomController(roomId: string): boolean {
+  const state = controllerStates.get(roomId);
+  if (!state) {
+    return false;
+  }
+
+  const wasActive = state.running
+    || state.timer !== null
+    || state.congratsTimer !== null
+    || state.countdownTimer !== null
+    || state.topicTransitionTimer !== null
+    || state.inCongrats
+    || state.inCountdown;
+
+  state.lifecycleRevision += 1;
+  clearTimer(roomId);
+  clearAllTransitionTimers(roomId);
+  state.running = false;
+  state.endsAtMs = 0;
+  state.openStartMs = 0;
+  state.inCongrats = false;
+  state.inCountdown = false;
+  return wasActive;
 }
 
 /**
@@ -936,6 +1070,9 @@ function emitTopicStart(topicId: string, roomId: string = DEFAULT_ROOM_ID): void
  * Emit topic countdown event and schedule topic start
  */
 export function emitTopicCountdown(topicId: string, countdownSeconds: number, roomId: string = DEFAULT_ROOM_ID): void {
+  if (!isGameplayRoomSupported(roomId)) {
+    return;
+  }
   const state = getControllerState(roomId);
   const endsAtMs = Date.now() + (countdownSeconds * 1000);
   
@@ -956,7 +1093,12 @@ export function emitTopicCountdown(topicId: string, countdownSeconds: number, ro
   markControllerChanged();
   
   // Schedule topic start after countdown
+  const lifecycleRevision = state.lifecycleRevision;
   state.topicTransitionTimer = setTimeout(() => {
+    state.topicTransitionTimer = null;
+    if (!isCurrentControllerCallback(roomId, state, lifecycleRevision)) {
+      return;
+    }
     startNextTopic(topicId, roomId);
   }, countdownSeconds * 1000);
 }

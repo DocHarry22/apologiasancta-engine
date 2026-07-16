@@ -5,8 +5,8 @@
  * Content lives in apologiasancta-ui/content/topics/
  */
 
-import { ingestQuestions, clearBank, getTotalBankSize, getTopicSummaries } from "./bank";
-import { UIQuestion } from "./validate";
+import { getTotalBankSize, getTopicSummaries, replaceCatalogAtomically } from "./bank";
+import { UIQuestion, validateQuestion } from "./validate";
 
 export interface GitHubSyncConfig {
   owner: string;
@@ -47,39 +47,31 @@ export function getGitHubSyncConfig(): GitHubSyncConfig | null {
   };
 }
 
-function getRequiredConfig(): GitHubSyncConfig {
-  const config = getGitHubSyncConfig();
-  if (!config) {
-    throw new Error("GitHub sync is not configured");
-  }
-  return config;
-}
-
 /**
  * Build raw GitHub URL for a file
  */
-function rawUrl(path: string): string {
-  const { owner, repo, branch } = getRequiredConfig();
+function rawUrl(config: GitHubSyncConfig, path: string): string {
+  const { owner, repo, branch } = config;
   return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
 }
 
 /**
  * Fetch JSON from GitHub raw API
  */
-async function fetchJson<T>(path: string): Promise<T> {
-  const url = rawUrl(path);
+async function fetchJson<T>(config: GitHubSyncConfig, path: string, signal: AbortSignal): Promise<T> {
+  const url = rawUrl(config, path);
   console.log(`[github] Fetching: ${url}`);
 
   const headers: Record<string, string> = {
     Accept: "application/json",
   };
 
-  const { token } = getRequiredConfig();
+  const { token } = config;
   if (token) {
     headers.Authorization = `token ${token}`;
   }
 
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, { headers, signal });
 
   if (!res.ok) {
     throw new Error(`GitHub fetch failed: ${res.status} ${res.statusText} for ${url}`);
@@ -91,8 +83,13 @@ async function fetchJson<T>(path: string): Promise<T> {
 /**
  * Fetch list of files in a directory using GitHub Contents API
  */
-async function listDirectory(path: string, type: "file" | "dir" = "file"): Promise<string[]> {
-  const { owner, repo, branch, token } = getRequiredConfig();
+async function listDirectory(
+  config: GitHubSyncConfig,
+  path: string,
+  type: "file" | "dir",
+  signal: AbortSignal
+): Promise<string[]> {
+  const { owner, repo, branch, token } = config;
   const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
   console.log(`[github] Listing directory: ${apiUrl}`);
 
@@ -105,7 +102,7 @@ async function listDirectory(path: string, type: "file" | "dir" = "file"): Promi
     headers.Authorization = `token ${token}`;
   }
 
-  const res = await fetch(apiUrl, { headers });
+  const res = await fetch(apiUrl, { headers, signal });
 
   if (!res.ok) {
     throw new Error(`GitHub API failed: ${res.status} ${res.statusText}`);
@@ -123,6 +120,18 @@ interface TopicIndex {
     questionCount: number;
     tags: string[];
   }>;
+}
+
+export interface GitHubContentSource {
+  fetchJson<T>(path: string): Promise<T>;
+  listDirectory(path: string, type: "file" | "dir"): Promise<string[]>;
+}
+
+export interface GitHubSyncResult {
+  success: boolean;
+  topicsLoaded: number;
+  questionsLoaded: number;
+  errors: string[];
 }
 
 interface GitHubQuestion {
@@ -143,7 +152,10 @@ interface GitHubQuestion {
 /**
  * Convert GitHub question format to UIQuestion format
  */
-function convertQuestion(q: GitHubQuestion): UIQuestion {
+function convertQuestion(value: unknown): UIQuestion {
+  const q = (value && typeof value === "object" ? value : {}) as Partial<GitHubQuestion>;
+  const choices = q.choices ?? {};
+  const teaching = q.teaching ?? { title: "", body: "", refs: [] };
   // Normalize difficulty to UIQuestion format
   let difficulty: UIQuestion["difficulty"];
   if (typeof q.difficulty === "string") {
@@ -155,18 +167,18 @@ function convertQuestion(q: GitHubQuestion): UIQuestion {
   }
 
   return {
-    id: q.id,
-    topicId: q.topicId,
+    id: q.id as string,
+    topicId: q.topicId as string,
     difficulty,
-    question: q.question,
+    question: q.question as string,
     choices: {
-      A: q.choices.A || q.choices.a || "",
-      B: q.choices.B || q.choices.b || "",
-      C: q.choices.C || q.choices.c || "",
-      D: q.choices.D || q.choices.d || "",
+      A: choices.A || choices.a || "",
+      B: choices.B || choices.b || "",
+      C: choices.C || choices.c || "",
+      D: choices.D || choices.d || "",
     },
-    correctId: (q.correctId.toUpperCase() as "A" | "B" | "C" | "D"),
-    teaching: q.teaching,
+    correctId: (typeof q.correctId === "string" ? q.correctId.toUpperCase() : "") as "A" | "B" | "C" | "D",
+    teaching,
     tags: q.tags,
   };
 }
@@ -176,18 +188,143 @@ function convertQuestion(q: GitHubQuestion): UIQuestion {
  *
  * @returns Summary of what was synced
  */
-export async function syncFromGitHub(): Promise<{
-  success: boolean;
-  topicsLoaded: number;
-  questionsLoaded: number;
-  errors: string[];
-}> {
+export async function syncCatalogFromSource(
+  source: GitHubContentSource,
+  contentPath: string
+): Promise<GitHubSyncResult> {
   const errors: string[] = [];
-  let questionsLoaded = 0;
-  let topicsLoaded = 0;
-  const config = getGitHubSyncConfig();
+  const candidateQuestions: UIQuestion[] = [];
+  const candidateIds = new Set<string>();
 
   console.log("[github] Starting sync from GitHub...");
+
+  try {
+    // Fetch index.json to get list of topics
+    const index = await source.fetchJson<TopicIndex>(`${contentPath}/index.json`);
+    const indexedTopicIds = index.topics.map((topic) => topic.id);
+
+    // Also discover topic folders directly from repository
+    let discoveredTopicIds: string[] = [];
+    try {
+      discoveredTopicIds = await source.listDirectory(contentPath, "dir");
+    } catch (err) {
+      const msg = `Failed to discover topic directories: ${err}`;
+      console.warn(`[github] ${msg}`);
+      errors.push(msg);
+    }
+
+    const topicIds = Array.from(new Set([...indexedTopicIds, ...discoveredTopicIds])).sort();
+    console.log(
+      `[github] Topics: index=${indexedTopicIds.length}, discovered=${discoveredTopicIds.length}, merged=${topicIds.length}`
+    );
+
+    // Fetch questions for each topic
+    for (const topicId of topicIds) {
+      try {
+        console.log(`[github] Loading topic: ${topicId}`);
+
+        // List question files in the topic's questions directory
+        const questionFiles = await source.listDirectory(`${contentPath}/${topicId}/questions`, "file");
+        const jsonFiles = questionFiles.filter((f) => f.endsWith(".json"));
+
+        console.log(`[github] Found ${jsonFiles.length} question files in ${topicId}`);
+
+        // Fetch each question
+        const questions: UIQuestion[] = [];
+        for (const file of jsonFiles) {
+          try {
+            const rawQuestion = await source.fetchJson<unknown>(
+              `${contentPath}/${topicId}/questions/${file}`
+            );
+            const question = convertQuestion(rawQuestion);
+            const validation = validateQuestion(question);
+            if (!validation.valid) {
+              throw new Error(validation.errors.join("; "));
+            }
+            if (candidateIds.has(question.id)) {
+              throw new Error(`Duplicate question id: ${question.id}`);
+            }
+            candidateIds.add(question.id);
+            questions.push(question);
+          } catch (err) {
+            const msg = `Failed to fetch ${topicId}/${file}: ${err}`;
+            console.error(`[github] ${msg}`);
+            errors.push(msg);
+          }
+        }
+
+        // Stage questions only. The live catalog remains untouched until every
+        // fetch and validation has succeeded.
+        if (questions.length > 0) {
+          candidateQuestions.push(...questions);
+          console.log(`[github] Staged ${questions.length} questions for ${topicId}`);
+        }
+      } catch (err) {
+        const msg = `Failed to load topic ${topicId}: ${err}`;
+        console.error(`[github] ${msg}`);
+        errors.push(msg);
+      }
+    }
+
+    if (errors.length > 0) {
+      console.warn(`[github] Sync rejected; retaining prior catalog (${errors.length} error(s))`);
+      return {
+        success: false,
+        topicsLoaded: 0,
+        questionsLoaded: 0,
+        errors,
+      };
+    }
+
+    if (candidateQuestions.length === 0) {
+      const error = "GitHub sync produced an empty catalog; retaining prior catalog";
+      console.warn(`[github] ${error}`);
+      return {
+        success: false,
+        topicsLoaded: 0,
+        questionsLoaded: 0,
+        errors: [error],
+      };
+    }
+
+    const replacement = replaceCatalogAtomically(candidateQuestions);
+    const topicsLoaded = new Set(candidateQuestions.map((question) => question.topicId)).size;
+    const questionsLoaded = candidateQuestions.length;
+    console.log(
+      `[github] Sync committed atomically: ${topicsLoaded} topics, ${questionsLoaded} questions `
+      + `(${replacement.added} added, ${replacement.updated} updated, ${replacement.removed} removed)`
+    );
+
+    return {
+      success: true,
+      topicsLoaded,
+      questionsLoaded,
+      errors: [],
+    };
+  } catch (err) {
+    const msg = `Failed to fetch index.json: ${err}`;
+    console.error(`[github] ${msg}`);
+    return {
+      success: false,
+      topicsLoaded: 0,
+      questionsLoaded: 0,
+      errors: [msg],
+    };
+  }
+}
+
+function resolveSyncTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.GITHUB_SYNC_TIMEOUT_MS ?? "60000", 10);
+  if (!Number.isFinite(parsed)) return 60_000;
+  return Math.max(5_000, Math.min(300_000, parsed));
+}
+
+/**
+ * Fetch and atomically replace the catalog. A timeout, fetch failure, or
+ * validation failure leaves the restored/live catalog unchanged.
+ */
+export async function syncFromGitHub(): Promise<GitHubSyncResult> {
+  const config = getGitHubSyncConfig();
   if (!config) {
     return {
       success: false,
@@ -203,86 +340,18 @@ export async function syncFromGitHub(): Promise<{
     `[github] Repo: ${config.owner}/${config.repo} (branch: ${config.branch}, path: ${config.contentPath})`
   );
 
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), resolveSyncTimeoutMs());
+  timeout.unref();
+  const source: GitHubContentSource = {
+    fetchJson: <T>(path: string) => fetchJson<T>(config, path, abortController.signal),
+    listDirectory: (path, type) => listDirectory(config, path, type, abortController.signal),
+  };
+
   try {
-    // Fetch index.json to get list of topics
-    const index = await fetchJson<TopicIndex>(`${config.contentPath}/index.json`);
-    const indexedTopicIds = index.topics.map((topic) => topic.id);
-
-    // Also discover topic folders directly from repository
-    let discoveredTopicIds: string[] = [];
-    try {
-      discoveredTopicIds = await listDirectory(config.contentPath, "dir");
-    } catch (err) {
-      const msg = `Failed to discover topic directories: ${err}`;
-      console.warn(`[github] ${msg}`);
-      errors.push(msg);
-    }
-
-    const topicIds = Array.from(new Set([...indexedTopicIds, ...discoveredTopicIds])).sort();
-    console.log(
-      `[github] Topics: index=${indexedTopicIds.length}, discovered=${discoveredTopicIds.length}, merged=${topicIds.length}`
-    );
-
-    // Clear existing bank before sync
-    clearBank();
-
-    // Fetch questions for each topic
-    for (const topicId of topicIds) {
-      try {
-        console.log(`[github] Loading topic: ${topicId}`);
-
-        // List question files in the topic's questions directory
-        const questionFiles = await listDirectory(`${config.contentPath}/${topicId}/questions`, "file");
-        const jsonFiles = questionFiles.filter((f) => f.endsWith(".json"));
-
-        console.log(`[github] Found ${jsonFiles.length} question files in ${topicId}`);
-
-        // Fetch each question
-        const questions: UIQuestion[] = [];
-        for (const file of jsonFiles) {
-          try {
-            const q = await fetchJson<GitHubQuestion>(
-              `${config.contentPath}/${topicId}/questions/${file}`
-            );
-            questions.push(convertQuestion(q));
-          } catch (err) {
-            const msg = `Failed to fetch ${topicId}/${file}: ${err}`;
-            console.error(`[github] ${msg}`);
-            errors.push(msg);
-          }
-        }
-
-        // Ingest questions into bank
-        if (questions.length > 0) {
-          const result = ingestQuestions(questions);
-          questionsLoaded += result.added + result.updated;
-          topicsLoaded++;
-          console.log(`[github] Ingested ${result.added} new, ${result.updated} updated for ${topicId}`);
-        }
-      } catch (err) {
-        const msg = `Failed to load topic ${topicId}: ${err}`;
-        console.error(`[github] ${msg}`);
-        errors.push(msg);
-      }
-    }
-
-    console.log(`[github] Sync complete: ${topicsLoaded} topics, ${questionsLoaded} questions`);
-
-    return {
-      success: errors.length === 0,
-      topicsLoaded,
-      questionsLoaded,
-      errors,
-    };
-  } catch (err) {
-    const msg = `Failed to fetch index.json: ${err}`;
-    console.error(`[github] ${msg}`);
-    return {
-      success: false,
-      topicsLoaded: 0,
-      questionsLoaded: 0,
-      errors: [msg],
-    };
+    return await syncCatalogFromSource(source, config.contentPath);
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
