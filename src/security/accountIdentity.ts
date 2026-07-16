@@ -30,7 +30,7 @@ export type AccountIdentityAssertionVerification =
 
 export type AccountIdentitySecretValidation =
   | { ok: true }
-  | { ok: false; reason: "missing" | "placeholder" | "too_short" };
+  | { ok: false; reason: "missing" | "placeholder" | "too_short" | "matches_player_join_secret" };
 
 const DEFAULT_ISSUER = "apologia-ui";
 const DEFAULT_ASSERTION_TTL_SECONDS = 120;
@@ -59,6 +59,7 @@ const PLACEHOLDER_PATTERNS = [
   /^your-(?:secure-)?account-identity-secret$/i,
   /^(?:change-?me|changeme|placeholder)$/i,
   /^apologia-sancta-local-account-identity-secret$/i,
+  /^apologia-sancta-local-join-token-secret$/i,
 ];
 
 function boundedInteger(raw: string | undefined, fallback: number, minimum: number, maximum: number): number {
@@ -69,6 +70,12 @@ function boundedInteger(raw: string | undefined, fallback: number, minimum: numb
 
 function isPlaceholderSecret(value: string): boolean {
   return PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function secretsMatch(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 export function isAccountIdentityEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -92,17 +99,24 @@ export function getAccountIdentityClockSkewSeconds(env: NodeJS.ProcessEnv = proc
   return boundedInteger(env.ACCOUNT_IDENTITY_CLOCK_SKEW_SECONDS, DEFAULT_CLOCK_SKEW_SECONDS, 0, MAX_CLOCK_SKEW_SECONDS);
 }
 
-export function validateAccountIdentitySecret(value: string | null | undefined): AccountIdentitySecretValidation {
+export function validateAccountIdentitySecret(
+  value: string | null | undefined,
+  playerJoinSecret?: string | null
+): AccountIdentitySecretValidation {
   const configured = value?.trim();
   if (!configured) return { ok: false, reason: "missing" };
   if (isPlaceholderSecret(configured)) return { ok: false, reason: "placeholder" };
   if (Buffer.byteLength(configured, "utf8") < MIN_SECRET_BYTES) return { ok: false, reason: "too_short" };
+  const configuredPlayerSecret = playerJoinSecret?.trim();
+  if (configuredPlayerSecret && secretsMatch(configured, configuredPlayerSecret)) {
+    return { ok: false, reason: "matches_player_join_secret" };
+  }
   return { ok: true };
 }
 
 export function isAccountIdentityConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
   return ISSUER_PATTERN.test(getAccountIdentityIssuer(env))
-    && validateAccountIdentitySecret(env.ACCOUNT_IDENTITY_SECRET).ok;
+    && validateAccountIdentitySecret(env.ACCOUNT_IDENTITY_SECRET, env.PLAYER_JOIN_SECRET).ok;
 }
 
 export function assertAccountIdentityConfiguration(env: NodeJS.ProcessEnv = process.env): void {
@@ -110,14 +124,18 @@ export function assertAccountIdentityConfiguration(env: NodeJS.ProcessEnv = proc
   if (!ISSUER_PATTERN.test(getAccountIdentityIssuer(env))) {
     throw new Error("ACCOUNT_IDENTITY_ISSUER must be 3-64 letters, numbers, dots, underscores, or hyphens");
   }
-  if (!validateAccountIdentitySecret(env.ACCOUNT_IDENTITY_SECRET).ok) {
+  const secretValidation = validateAccountIdentitySecret(env.ACCOUNT_IDENTITY_SECRET, env.PLAYER_JOIN_SECRET);
+  if (!secretValidation.ok && secretValidation.reason === "matches_player_join_secret") {
+    throw new Error("ACCOUNT_IDENTITY_SECRET must be different from PLAYER_JOIN_SECRET");
+  }
+  if (!secretValidation.ok) {
     throw new Error("ACCOUNT_IDENTITY_SECRET must contain at least 32 random bytes and must not be a placeholder");
   }
 }
 
 function getSecret(env: NodeJS.ProcessEnv = process.env): string {
   const secret = env.ACCOUNT_IDENTITY_SECRET?.trim();
-  const validation = validateAccountIdentitySecret(secret);
+  const validation = validateAccountIdentitySecret(secret, env.PLAYER_JOIN_SECRET);
   if (!validation.ok) {
     throw new Error("Account identity assertion signing is not configured");
   }

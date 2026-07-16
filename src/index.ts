@@ -41,8 +41,10 @@ if (process.env.NODE_ENV === "production") {
     throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
   }
   assertProductionJoinSecret();
-  assertAccountIdentityConfiguration();
 }
+// The opt-in exchange must fail fast in every environment when enabled with an
+// invalid or reused key. When disabled, this is intentionally a no-op.
+assertAccountIdentityConfiguration();
 
 let server: Server | null = null;
 let shuttingDown = false;

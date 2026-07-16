@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertAccountIdentityConfiguration,
+  isAccountIdentityConfigured,
   signAccountIdentityAssertion,
   validateAccountIdentitySecret,
   verifyAccountIdentityAssertion,
@@ -120,8 +122,70 @@ test("account assertions are strict, tamper-evident, short-lived, and backed by 
     { ok: false, reason: "expired" }
   );
   assert.deepEqual(validateAccountIdentitySecret("replace-with-account-secret"), { ok: false, reason: "placeholder" });
+  assert.deepEqual(validateAccountIdentitySecret("apologia-sancta-local-join-token-secret"), { ok: false, reason: "placeholder" });
   assert.deepEqual(validateAccountIdentitySecret("x".repeat(31)), { ok: false, reason: "too_short" });
   assert.deepEqual(validateAccountIdentitySecret("x".repeat(32)), { ok: true });
+});
+
+test("account identity and room join secrets must remain separate at startup and runtime", async () => {
+  const reusedSecret = "shared-secret-that-must-not-cross-trust-boundaries-0123456789";
+  const reusedEnvironment: NodeJS.ProcessEnv = {
+    ACCOUNT_IDENTITY_ENABLED: "true",
+    ACCOUNT_IDENTITY_SECRET: ` ${reusedSecret} `,
+    ACCOUNT_IDENTITY_ISSUER: "apologia-ui",
+    PLAYER_JOIN_SECRET: reusedSecret,
+  };
+
+  assert.deepEqual(
+    validateAccountIdentitySecret(reusedEnvironment.ACCOUNT_IDENTITY_SECRET, reusedEnvironment.PLAYER_JOIN_SECRET),
+    { ok: false, reason: "matches_player_join_secret" }
+  );
+  assert.equal(isAccountIdentityConfigured(reusedEnvironment), false);
+  assert.throws(
+    () => assertAccountIdentityConfiguration(reusedEnvironment),
+    /ACCOUNT_IDENTITY_SECRET must be different from PLAYER_JOIN_SECRET/
+  );
+  assert.doesNotThrow(() => assertAccountIdentityConfiguration({
+    ...reusedEnvironment,
+    ACCOUNT_IDENTITY_ENABLED: "false",
+  }));
+  assert.throws(
+    () => signAccountIdentityAssertion({ subject: "account-00000007", displayName: "Cyprian" }, Date.now(), reusedEnvironment),
+    /Account identity assertion signing is not configured/
+  );
+
+  process.env.ACCOUNT_IDENTITY_SECRET = process.env.PLAYER_JOIN_SECRET;
+  process.env.ACCOUNT_IDENTITY_ENABLED = "false";
+  const server = await startTestServer();
+  try {
+    const disabledDiagnostics = await fetch(`${server.baseUrl}/diagnostics`).then((response) => response.json()) as {
+      readiness: { accountIdentityExchange: boolean };
+      features: { accountIdentityExchange: boolean };
+    };
+    assert.equal(disabledDiagnostics.features.accountIdentityExchange, false);
+    assert.equal(disabledDiagnostics.readiness.accountIdentityExchange, true);
+    const disabled = await exchange(server.baseUrl, "not-a-valid-assertion");
+    assert.equal(disabled.response.status, 503);
+    assert.equal(disabled.body.reason, "account_identity_disabled");
+
+    process.env.ACCOUNT_IDENTITY_ENABLED = "true";
+    const diagnosticsResponse = await fetch(`${server.baseUrl}/diagnostics`);
+    assert.equal(diagnosticsResponse.status, 200);
+    const diagnosticsText = await diagnosticsResponse.text();
+    assert.equal(diagnosticsText.includes(process.env.ACCOUNT_IDENTITY_SECRET!), false);
+    const diagnostics = JSON.parse(diagnosticsText) as {
+      readiness: { accountIdentityExchange: boolean };
+      features: { accountIdentityExchange: boolean };
+    };
+    assert.equal(diagnostics.features.accountIdentityExchange, true);
+    assert.equal(diagnostics.readiness.accountIdentityExchange, false);
+
+    const unavailable = await exchange(server.baseUrl, "not-a-valid-assertion");
+    assert.equal(unavailable.response.status, 503);
+    assert.equal(unavailable.body.reason, "account_identity_unavailable");
+  } finally {
+    await server.close();
+  }
 });
 
 test("account identity stays stable across rooms, fresh sessions, and a persistence restore", async () => {

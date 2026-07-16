@@ -6,6 +6,7 @@ This is an additive, opt-in bridge between the authenticated Next.js account aut
 
 - Only an authenticated Next.js server route may create an account assertion.
 - `ACCOUNT_IDENTITY_SECRET` is a separate 32+ byte random secret stored in Hostinger's server environment and Render's secret manager.
+- The Engine rejects `ACCOUNT_IDENTITY_SECRET` when it matches `PLAYER_JOIN_SECRET`; when account identity is enabled, this fails startup and reports the exchange as not ready without exposing either secret.
 - Never prefix the secret with `NEXT_PUBLIC_`, send it to a browser, put it in local storage, or bundle it into Capacitor/Android.
 - `subject` must be the UI database's opaque, immutable account ID. Do not use an email address, username, display name, or other mutable or identifying value.
 - The browser may receive the resulting ordinary room-scoped `joinToken`; it must never receive the account assertion or signing secret.
