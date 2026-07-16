@@ -9,6 +9,7 @@ import {
 } from "./security/accountIdentity";
 import { verifyJoinToken } from "./security/joinToken";
 import {
+  ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
   getAccountIdentityMapping,
   getPlayer,
   getPlayersPersistenceSnapshot,
@@ -572,6 +573,189 @@ test("account identity stays stable across rooms, fresh sessions, and a persiste
     const restoredBody = restored.body as unknown as ExchangeSuccess;
     assert.equal(restoredBody.userId, firstBody.userId);
     assert.equal(restoredBody.identityCreated, false);
+  } finally {
+    await server.close();
+    await temp.cleanup();
+  }
+});
+
+test("account display names can only change through a fresh backend assertion", async () => {
+  const temp = await createTempStateFilePath();
+  configurePersistenceForTests(temp.filePath);
+  const originRoom = createRoom("Managed Name Origin", "managed-name-origin");
+  const targetRoom = createRoom("Managed Name Target", "managed-name-target");
+  const subject = "account-managed-display-name";
+  const originalName = "Assertion_Owned";
+  const assertedRename = "Assertion_Renamed";
+  const server = await startTestServer();
+
+  try {
+    const initial = await exchange(server.baseUrl, signAccountIdentityAssertion({
+      subject,
+      displayName: originalName,
+      roomId: originRoom.roomId,
+      nonce: "managed-name-initial",
+    }));
+    assert.equal(initial.response.status, 200);
+    const account = initial.body as unknown as ExchangeSuccess;
+
+    const mutationAttempts: Array<{ path: string; body: Record<string, string>; tokenInBody?: boolean }> = [
+      {
+        path: "/register",
+        body: { userId: account.userId, username: "Token_Override", roomId: targetRoom.roomId },
+      },
+      {
+        path: `/register/${targetRoom.roomId}`,
+        body: { userId: account.userId, username: "Token_Override", joinToken: account.joinToken },
+        tokenInBody: true,
+      },
+      {
+        path: `/rooms/${targetRoom.roomId}/register`,
+        body: { userId: account.userId, username: "Token_Override" },
+      },
+      {
+        path: "/register/rename",
+        body: { userId: account.userId, newUsername: "Token_Override", roomId: targetRoom.roomId },
+      },
+      {
+        path: `/register/${targetRoom.roomId}/rename`,
+        body: { userId: account.userId, newUsername: "assertion_Owned" },
+      },
+    ];
+
+    for (const attempt of mutationAttempts) {
+      const response = await fetch(`${server.baseUrl}${attempt.path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(attempt.tokenInBody ? {} : { authorization: `Bearer ${account.joinToken}` }),
+        },
+        body: JSON.stringify(attempt.body),
+      });
+      assert.equal(response.status, 403, attempt.path);
+      const body = await response.json() as { ok?: boolean; reason?: string; message?: string };
+      assert.equal(body.ok, false, attempt.path);
+      assert.equal(body.reason, ACCOUNT_DISPLAY_NAME_MANAGED_REASON, attempt.path);
+      assert.match(body.message ?? "", /identity\/exchange/, attempt.path);
+      assert.equal(getPlayer(account.userId)?.username, originalName);
+      assert.equal(isUsernameTaken("Token_Override"), false);
+      assert.equal(isPlayerInRoom(targetRoom.roomId, account.userId), false);
+    }
+
+    const directGuestMutation = registerPlayer("Direct_Override", account.userId);
+    assert.equal(directGuestMutation.ok, false);
+    assert.equal(directGuestMutation.reason, ACCOUNT_DISPLAY_NAME_MANAGED_REASON);
+    assert.equal(getPlayer(account.userId)?.username, originalName);
+    assert.equal(isUsernameTaken("Direct_Override"), false);
+
+    const guestRegistration = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "Ordinary_Guest", roomId: originRoom.roomId }),
+    });
+    assert.equal(guestRegistration.status, 200);
+    const guest = await guestRegistration.json() as { userId: string; username: string; joinToken: string };
+    const guestRename = await fetch(`${server.baseUrl}/register/rename`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${guest.joinToken}`,
+      },
+      body: JSON.stringify({
+        userId: guest.userId,
+        newUsername: "Ordinary_Renamed",
+        roomId: targetRoom.roomId,
+      }),
+    });
+    assert.equal(guestRename.status, 200);
+    assert.equal((await guestRename.json() as { username: string }).username, "Ordinary_Renamed");
+    assert.equal(getPlayer(guest.userId)?.username, "Ordinary_Renamed");
+
+    const sameNameRejoin = await fetch(`${server.baseUrl}/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${account.joinToken}`,
+      },
+      body: JSON.stringify({
+        userId: account.userId,
+        username: originalName,
+        roomId: targetRoom.roomId,
+      }),
+    });
+    assert.equal(sameNameRejoin.status, 200);
+    const rejoinBody = await sameNameRejoin.json() as { userId: string; username: string; joinToken: string };
+    assert.equal(rejoinBody.userId, account.userId);
+    assert.equal(rejoinBody.username, originalName);
+    assert.equal(verifyJoinToken(rejoinBody.joinToken).ok, true);
+    assert.equal(isPlayerInRoom(targetRoom.roomId, account.userId), true);
+
+    const renamed = await exchange(server.baseUrl, signAccountIdentityAssertion({
+      subject,
+      displayName: assertedRename,
+      roomId: targetRoom.roomId,
+      nonce: "managed-name-asserted-rename",
+    }));
+    assert.equal(renamed.response.status, 200);
+    const renamedBody = renamed.body as unknown as ExchangeSuccess;
+    assert.equal(renamedBody.userId, account.userId);
+    assert.equal(renamedBody.username, assertedRename);
+    assert.equal(renamedBody.identityCreated, false);
+    assert.equal(getPlayer(account.userId)?.username, assertedRename);
+
+    const staleTokenAttempts: Array<{ path: string; body: Record<string, string> }> = [
+      {
+        path: "/register",
+        body: { userId: account.userId, username: originalName, roomId: targetRoom.roomId },
+      },
+      {
+        path: "/register/rename",
+        body: { userId: account.userId, newUsername: "Stale_Override", roomId: targetRoom.roomId },
+      },
+    ];
+    for (const attempt of staleTokenAttempts) {
+      const response = await fetch(`${server.baseUrl}${attempt.path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${account.joinToken}`,
+        },
+        body: JSON.stringify(attempt.body),
+      });
+      assert.equal(response.status, 403, attempt.path);
+      assert.equal(
+        (await response.json() as { reason: string }).reason,
+        ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
+        attempt.path
+      );
+      assert.equal(getPlayer(account.userId)?.username, assertedRename);
+    }
+    assert.equal(isUsernameTaken(originalName), false);
+    assert.equal(isUsernameTaken("Stale_Override"), false);
+
+    const assertedCaseRename = "assertion_Renamed";
+    const caseRenamed = await exchange(server.baseUrl, signAccountIdentityAssertion({
+      subject,
+      displayName: assertedCaseRename,
+      roomId: targetRoom.roomId,
+      nonce: "managed-name-case-rename",
+    }));
+    assert.equal(caseRenamed.response.status, 200);
+    const caseRenamedBody = caseRenamed.body as unknown as ExchangeSuccess;
+    assert.equal(caseRenamedBody.userId, account.userId);
+    assert.equal(caseRenamedBody.username, assertedCaseRename);
+    assert.equal(caseRenamedBody.identityCreated, false);
+    assert.equal(getPlayer(account.userId)?.username, assertedCaseRename);
+
+    await flushPersistence();
+    resetRuntimeState();
+    assert.equal(await restoreConfiguredPersistence(), true);
+    assert.equal(getAccountIdentityMapping("apologia-ui", subject)?.userId, account.userId);
+    assert.equal(getPlayer(account.userId)?.username, assertedCaseRename);
+    assert.equal(isUsernameTaken(originalName), false);
+    assert.equal(isUsernameTaken(assertedCaseRename), true);
+    assert.equal(isPlayerInRoom(originRoom.roomId, account.userId), true);
+    assert.equal(isPlayerInRoom(targetRoom.roomId, account.userId), true);
   } finally {
     await server.close();
     await temp.cleanup();

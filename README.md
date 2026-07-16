@@ -8,7 +8,7 @@ Deployed on Render: `https://apologiasancta-engine.onrender.com`
 
 The production blueprint now uses PostgreSQL atomic runtime snapshots and no longer provisions an unused Redis service. Player registration issues an HMAC-signed, expiring room token; join, leave, rename and answer routes enforce that identity, while expired signed sessions may be refreshed by rejoining. Production rejects placeholder player secrets and requires at least 32 random bytes. It also has strict origin resolution, classroom-safe configurable registration limits, request IDs, bounded bodies and a non-secret `/diagnostics` readiness endpoint.
 
-An opt-in account identity exchange now lets the authenticated Next.js server map its opaque account subject to a durable Engine-owned player ID. The shared HMAC secret stays backend-only, assertions expire quickly and are room-bound, exact retries are idempotent, and nonce reuse with different signed content is rejected. Guest registration and existing room join tokens remain supported. See [`docs/ACCOUNT_IDENTITY_ROLLOUT.md`](docs/ACCOUNT_IDENTITY_ROLLOUT.md) before enabling it.
+An opt-in account identity exchange now lets the authenticated Next.js server map its opaque account subject to a durable Engine-owned player ID. The shared HMAC secret stays backend-only, assertions expire quickly and are room-bound, exact retries are idempotent, and nonce reuse with different signed content is rejected. Guest registration and existing room join tokens remain supported, but an account-linked display name can only change through a fresh backend assertion. See [`docs/ACCOUNT_IDENTITY_ROLLOUT.md`](docs/ACCOUNT_IDENTITY_ROLLOUT.md) before enabling it.
 
 `ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Configure the latter on Render before deploying this branch. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
 
@@ -169,6 +169,9 @@ npm start
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/register` | POST | Register a player in the default flow |
+| `/register/:roomId` | POST | Register or rejoin directly into a room |
+| `/register/rename` | POST | Rename a guest player with a current room token |
+| `/register/:roomId/rename` | POST | Rename a guest player and join the selected room |
 | `/register/me` | GET | Resolve a player and auto-rejoin their room |
 | `/register/rank` | GET | Player rank snapshot |
 | `/register/check` | GET | Username availability check |

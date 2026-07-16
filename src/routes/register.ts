@@ -4,6 +4,7 @@ import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../securi
 import { signJoinToken } from "../security/joinToken";
 import { normalizePublicDisplayName } from "../security/publicDisplayName";
 import {
+  ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
   getPlayer,
   getPlayerInfo,
   isAccountLinkedPlayer,
@@ -28,6 +29,12 @@ export const registrationRateLimit = createRateLimit({
 
 type RegisterBody = { username?: unknown; userId?: unknown; roomId?: unknown };
 type RenameBody = { userId?: unknown; newUsername?: unknown; roomId?: unknown };
+
+function registrationFailureStatus(reason: string | undefined): number {
+  if (reason === ACCOUNT_DISPLAY_NAME_MANAGED_REASON) return 403;
+  if (reason === "username_taken") return 409;
+  return 400;
+}
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] ?? "" : value;
@@ -84,7 +91,7 @@ export function handleRegister(req: Request, res: Response, roomId: string): voi
 
   const result = registerPlayer(body.username, authorizedUserId);
   if (!result.ok || !result.userId || !result.username) {
-    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
+    res.status(registrationFailureStatus(result.reason)).json(result);
     return;
   }
   initializePlayerRoom(result.userId, roomId);
@@ -155,7 +162,7 @@ function handleRename(req: Request, res: Response, roomId: string): void {
   }
   const result = registerPlayer(body.newUsername, body.userId);
   if (!result.ok || !result.userId || !result.username) {
-    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
+    res.status(registrationFailureStatus(result.reason)).json(result);
     return;
   }
   initializePlayerRoom(result.userId, roomId);

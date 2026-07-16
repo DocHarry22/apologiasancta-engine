@@ -32,11 +32,13 @@ export interface AccountIdentityMapping {
   lastExchangedAt: number;
 }
 
+export const ACCOUNT_DISPLAY_NAME_MANAGED_REASON = "account_display_name_managed";
+
 export interface RegisterResult {
   ok: boolean;
   userId?: string;
   username?: string;
-  reason?: "invalid_username" | "username_taken" | "invalid_format";
+  reason?: "invalid_username" | "username_taken" | "invalid_format" | typeof ACCOUNT_DISPLAY_NAME_MANAGED_REASON;
   message?: string;
 }
 
@@ -270,7 +272,11 @@ export function isValidUsername(username: string): boolean {
   return isValidPublicDisplayName(username);
 }
 
-export function registerPlayer(requestedUsername: string, providedUserId?: string): RegisterResult {
+function registerPlayerWithAuthority(
+  requestedUsername: string,
+  providedUserId?: string,
+  allowAccountDisplayNameChange = false
+): RegisterResult {
   const username = normalizePublicDisplayName(requestedUsername);
   const usernameLower = username.toLowerCase();
 
@@ -282,10 +288,31 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
     };
   }
 
+  const existingPlayer = providedUserId ? players.get(providedUserId) : undefined;
+  if (
+    existingPlayer
+    && accountLinkedUserIds.has(existingPlayer.userId)
+    && existingPlayer.username !== username
+    && !allowAccountDisplayNameChange
+  ) {
+    return {
+      ok: false,
+      reason: ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
+      message: "Account-linked display names can only be changed through /identity/exchange",
+    };
+  }
+
   const existingUserId = usernameToUserId.get(usernameLower);
   if (existingUserId) {
     if (providedUserId && existingUserId === providedUserId) {
       const player = players.get(providedUserId)!;
+      if (allowAccountDisplayNameChange && player.username !== username) {
+        const updatedPlayer = { ...player, username, usernameLower };
+        players.set(providedUserId, updatedPlayer);
+        schedulePersistence();
+        console.log(`[Players] Registered: ${username} (${providedUserId})`);
+        return { ok: true, userId: providedUserId, username };
+      }
       return { ok: true, userId: providedUserId, username: player.username };
     }
 
@@ -297,13 +324,13 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
   }
 
   const userId = providedUserId || randomUUID();
-  const existingPlayer = players.get(userId);
-  if (existingPlayer && existingPlayer.usernameLower !== usernameLower) {
-    usernameToUserId.delete(existingPlayer.usernameLower);
+  const currentPlayer = existingPlayer ?? players.get(userId);
+  if (currentPlayer && currentPlayer.usernameLower !== usernameLower) {
+    usernameToUserId.delete(currentPlayer.usernameLower);
   }
 
-  const player: Player = existingPlayer
-    ? { ...existingPlayer, username, usernameLower }
+  const player: Player = currentPlayer
+    ? { ...currentPlayer, username, usernameLower }
     : {
         userId,
         username,
@@ -317,6 +344,11 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
 
   console.log(`[Players] Registered: ${username} (${userId})`);
   return { ok: true, userId, username };
+}
+
+/** Guest/player-session registration never has authority to rename an account identity. */
+export function registerPlayer(requestedUsername: string, providedUserId?: string): RegisterResult {
+  return registerPlayerWithAuthority(requestedUsername, providedUserId);
 }
 
 export function isRegistered(userId: string): boolean {
@@ -345,7 +377,7 @@ function accountCollisionFallback(displayName: string, userId: string): string {
  * Resolve an account authority's opaque subject to an Engine-owned opaque ID.
  * The external subject never becomes a public player ID or leaderboard field.
  */
-export function resolveAccountPlayer(
+function resolveAccountPlayer(
   issuer: string,
   subject: string,
   requestedDisplayName: string,
@@ -356,7 +388,8 @@ export function resolveAccountPlayer(
 
   if (existingMapping) {
     const existingPlayer = players.get(existingMapping.userId);
-    const update = registerPlayer(requestedDisplayName, existingMapping.userId);
+    // Trusted account-resolution path; its HTTP caller verifies the backend assertion first.
+    const update = registerPlayerWithAuthority(requestedDisplayName, existingMapping.userId, true);
     existingMapping.lastExchangedAt = nowMs;
     schedulePersistence();
 
@@ -513,7 +546,7 @@ export function getOrCreatePlayer(userId: string, displayName: string): Player {
   let player = players.get(userId);
 
   if (player) {
-    if (userId.startsWith("yt:")) {
+    if (userId.startsWith("yt:") && !accountLinkedUserIds.has(userId)) {
       const normalizedNew = normalizePublicDisplayName(displayName);
       if (player.username !== normalizedNew && player.usernameLower !== normalizedNew.toLowerCase()) {
         const newLower = normalizedNew.toLowerCase();
