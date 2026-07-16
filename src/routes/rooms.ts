@@ -5,7 +5,7 @@ import { getAnswerWindowStatus } from "../engine/roundController";
 import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
 import { addClient, removeClient } from "../sse/broker";
-import { getPlayer, getLeaderboardForPeriod, initializePlayerRoom, isRegistered } from "../state/players";
+import { getPlayer, getLeaderboardForPeriod, initializePlayerRoom, isAccountLinkedPlayer, isRegistered } from "../state/players";
 import { getStateForRoom } from "../state/store";
 import { getRoom, isGameplayRoomSupported, isPlayerInRoom, joinRoom, leaveRoom, listRooms } from "../state/rooms";
 import type { LeaderboardPeriod } from "../types/quiz";
@@ -56,7 +56,7 @@ router.post("/:roomId/join", (req: Request<{ roomId: string }>, res) => {
   if (!authorization) return;
   const player = getPlayer(userId);
   if (!player) return res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
-  if (isExpiredJoinTokenPayload(authorization) && authorization.displayName !== player.username) {
+  if (isExpiredJoinTokenPayload(authorization) && (isAccountLinkedPlayer(userId) || authorization.displayName !== player.username)) {
     return res.status(401).json({
       ok: false,
       reason: "join_token_expired",

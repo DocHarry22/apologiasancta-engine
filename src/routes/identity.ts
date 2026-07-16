@@ -13,8 +13,6 @@ import { flushPersistence } from "../state/persistence";
 import { getPlayerRooms, getRoom, isGameplayRoomSupported, joinRoom } from "../state/rooms";
 
 const router = Router();
-const MAX_REPLAY_CACHE_ENTRIES = 5_000;
-
 interface IdentityExchangeResponse {
   ok: true;
   identityType: "account";
@@ -67,11 +65,6 @@ const identityExchangeRateLimit = createRateLimit({
 function cleanupReplayCache(nowSeconds: number): void {
   for (const [key, entry] of replayCache) {
     if (entry.retainUntil <= nowSeconds) replayCache.delete(key);
-  }
-  while (replayCache.size >= MAX_REPLAY_CACHE_ENTRIES) {
-    const oldestKey = replayCache.keys().next().value as string | undefined;
-    if (!oldestKey) break;
-    replayCache.delete(oldestKey);
   }
 }
 

@@ -79,6 +79,7 @@ export interface PersistedPlayersSnapshot {
 const players: Map<string, Player> = new Map();
 const usernameToUserId: Map<string, string> = new Map();
 const accountIdentities: Map<string, AccountIdentityMapping> = new Map();
+const accountLinkedUserIds: Set<string> = new Set();
 const roomStates: Map<string, RoomPlayerState> = new Map();
 
 function accountIdentityKey(issuer: string, subject: string): string {
@@ -387,6 +388,7 @@ export function resolveAccountPlayer(
     createdAt: nowMs,
     lastExchangedAt: nowMs,
   });
+  accountLinkedUserIds.add(userId);
   schedulePersistence();
   console.log(`[Players] Account identity linked: issuer=${issuer} userId=${userId}`);
   return { ...registration, identityCreated: true, displayNameAdjusted };
@@ -395,6 +397,10 @@ export function resolveAccountPlayer(
 export function getAccountIdentityMapping(issuer: string, subject: string): AccountIdentityMapping | undefined {
   const mapping = accountIdentities.get(accountIdentityKey(issuer, subject));
   return mapping ? { ...mapping } : undefined;
+}
+
+export function isAccountLinkedPlayer(userId: string): boolean {
+  return accountLinkedUserIds.has(userId);
 }
 
 function getChannelIdSuffix(userId: string): string {
@@ -625,6 +631,7 @@ export function resetAllPlayers(): void {
   players.clear();
   usernameToUserId.clear();
   accountIdentities.clear();
+  accountLinkedUserIds.clear();
   roomStates.clear();
   schedulePersistence();
   console.log("[Players] All player data reset");
@@ -811,6 +818,7 @@ export function hydratePlayersPersistenceSnapshot(snapshot: PersistedPlayersSnap
   players.clear();
   usernameToUserId.clear();
   accountIdentities.clear();
+  accountLinkedUserIds.clear();
   roomStates.clear();
 
   if (!snapshot) {
@@ -826,6 +834,7 @@ export function hydratePlayersPersistenceSnapshot(snapshot: PersistedPlayersSnap
     if (!mapping || typeof mapping.issuer !== "string" || typeof mapping.subject !== "string") continue;
     if (typeof mapping.userId !== "string" || !players.has(mapping.userId)) continue;
     accountIdentities.set(accountIdentityKey(mapping.issuer, mapping.subject), { ...mapping });
+    accountLinkedUserIds.add(mapping.userId);
   }
 
   for (const persistedRoomState of snapshot.roomStates || []) {

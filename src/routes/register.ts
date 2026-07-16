@@ -6,6 +6,7 @@ import { normalizePublicDisplayName } from "../security/publicDisplayName";
 import {
   getPlayer,
   getPlayerInfo,
+  isAccountLinkedPlayer,
   getPlayerRank,
   initializePlayerRoom,
   isUsernameTaken,
@@ -69,7 +70,7 @@ export function handleRegister(req: Request, res: Response, roomId: string): voi
     if (isExpiredJoinTokenPayload(authorization)) {
       const currentPlayer = getPlayer(body.userId);
       const requestedName = normalizePublicDisplayName(body.username);
-      if (!currentPlayer || authorization.displayName !== currentPlayer.username || requestedName !== currentPlayer.username) {
+      if (isAccountLinkedPlayer(body.userId) || !currentPlayer || authorization.displayName !== currentPlayer.username || requestedName !== currentPlayer.username) {
         res.status(401).json({
           ok: false,
           reason: "join_token_expired",

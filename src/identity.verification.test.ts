@@ -162,6 +162,40 @@ test("account identity stays stable across rooms, fresh sessions, and a persiste
     if (secondToken.ok) {
       assert.equal(secondToken.payload.userId, firstBody.userId);
       assert.equal(secondToken.payload.roomId, "beta-room");
+
+      await withPatchedNow(secondToken.payload.expiresAt * 1000, async () => {
+        const expiredJoin = await fetch(`${server.baseUrl}/rooms/beta-room/join`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${secondBody.joinToken}` },
+          body: JSON.stringify({ userId: firstBody.userId }),
+        });
+        assert.equal(expiredJoin.status, 401);
+        assert.equal((await expiredJoin.json() as { reason: string }).reason, "join_token_expired");
+
+        const expiredRegistration = await fetch(`${server.baseUrl}/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${secondBody.joinToken}` },
+          body: JSON.stringify({
+            userId: firstBody.userId,
+            username: secondBody.username,
+            roomId: "beta-room",
+          }),
+        });
+        assert.equal(expiredRegistration.status, 401);
+        assert.equal((await expiredRegistration.json() as { reason: string }).reason, "join_token_expired");
+
+        const freshAssertion = signAccountIdentityAssertion({
+          subject,
+          displayName: "Irenaeus",
+          roomId: "beta-room",
+        });
+        const refreshed = await exchange(server.baseUrl, freshAssertion);
+        assert.equal(refreshed.response.status, 200);
+        const refreshedBody = refreshed.body as unknown as ExchangeSuccess;
+        assert.equal(refreshedBody.userId, firstBody.userId);
+        assert.equal(refreshedBody.identityCreated, false);
+        assert.equal(verifyJoinToken(refreshedBody.joinToken).ok, true);
+      });
     }
 
     resetRuntimeState();
