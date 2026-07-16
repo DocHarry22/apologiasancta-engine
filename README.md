@@ -111,6 +111,8 @@ PLAYER_JOIN_SECRET=
 # Classroom-safe registration defaults; tune upward for larger events.
 RATE_LIMIT_REGISTER_MAX=120
 RATE_LIMIT_REGISTER_WINDOW_MS=600000
+RATE_LIMIT_IDENTITY_EXCHANGE_MAX=6000
+RATE_LIMIT_IDENTITY_EXCHANGE_WINDOW_MS=600000
 
 # YouTube integration (optional)
 YOUTUBE_API_KEY=AIza...your_key

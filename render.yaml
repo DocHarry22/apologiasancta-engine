@@ -30,6 +30,10 @@ services:
         value: "120"
       - key: ACCOUNT_IDENTITY_CLOCK_SKEW_SECONDS
         value: "15"
+      - key: RATE_LIMIT_IDENTITY_EXCHANGE_MAX
+        value: "6000"
+      - key: RATE_LIMIT_IDENTITY_EXCHANGE_WINDOW_MS
+        value: "600000"
       - key: CORS_ORIGINS
         value: https://sandybrown-bear-488955.hostingersite.com
       - key: ALLOW_LOCAL_ORIGINS

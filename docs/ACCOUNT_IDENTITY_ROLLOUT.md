@@ -56,6 +56,8 @@ On success the Engine returns an opaque `acct_<uuid>` `userId`, the safe public 
 
 Within one Engine process, exact retries of the same assertion return the same join token until the assertion expires. Reusing a nonce with different signed content returns `409 identity_assertion_nonce_reused`. Replay state is process-local by design; the short expiry and server-only TLS call are the primary replay controls. Run a single Engine instance until replay state and room orchestration use a shared store.
 
+The exchange route also has a coarse shared-server rate limit. Because authenticated requests are sent by the Next.js server, many learners can legitimately share one Hostinger egress IP. The documented defaults are `RATE_LIMIT_IDENTITY_EXCHANGE_MAX=6000` per `RATE_LIMIT_IDENTITY_EXCHANGE_WINDOW_MS=600000`; size this above the largest expected room/reconnect burst and monitor 429 responses. Assertion verification and nonce replay controls remain mandatory regardless of this ceiling.
+
 ## Safe deployment order
 
 1. Deploy this Engine build with `ACCOUNT_IDENTITY_ENABLED=false`. Guest behavior is unchanged.

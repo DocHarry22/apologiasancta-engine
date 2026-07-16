@@ -50,10 +50,17 @@ interface IdentityExchangeResult {
   body: IdentityExchangeResponse | IdentityExchangeFailure;
 }
 
+// Calls arrive from the trusted Next.js server, so every signed-in learner can
+// share one Hostinger egress IP. Keep a generous coarse abuse ceiling here;
+// assertion verification, nonce replay protection, and room binding provide
+// the per-request security controls.
+export const DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_MAX = 6_000;
+export const DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
 const identityExchangeRateLimit = createRateLimit({
   name: "IDENTITY_EXCHANGE",
-  max: 120,
-  windowMs: 10 * 60 * 1000,
+  max: DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_MAX,
+  windowMs: DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_WINDOW_MS,
   message: "Too many account identity exchanges. Try again later.",
 });
 

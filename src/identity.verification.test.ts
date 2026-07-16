@@ -8,6 +8,10 @@ import {
 import { verifyJoinToken } from "./security/joinToken";
 import { createRoom } from "./state/rooms";
 import {
+  DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_MAX,
+  DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_WINDOW_MS,
+} from "./routes/identity";
+import {
   configurePersistenceForTests,
   createTempStateFilePath,
   resetPersistenceState,
@@ -81,6 +85,8 @@ test.afterEach(async () => {
 });
 
 test("account assertions are strict, tamper-evident, short-lived, and backed by a production-grade secret", () => {
+  assert.equal(DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_MAX, 6_000);
+  assert.equal(DEFAULT_IDENTITY_EXCHANGE_RATE_LIMIT_WINDOW_MS, 600_000);
   const issuedAtMs = 1_780_000_000_000;
   const env: NodeJS.ProcessEnv = {
     ACCOUNT_IDENTITY_SECRET: TEST_ACCOUNT_SECRET,
