@@ -259,7 +259,7 @@ Runtime snapshots include:
 - room registry and memberships
 - players, room scores, room streaks, and score event history
 
-On restart, the engine restores the current checkpoint. With `QUIZ_AUTO_START=true`, every active room receives a fresh `OPEN` deadline instead of reusing a stale persisted timer. With `QUIZ_CONTINUOUS=true`, topic transitions remain automatic, the final topic wraps to the first, the legacy fallback bank wraps to question one, and newly created rooms start immediately. Without either flag, the legacy manual-start behavior remains available for development or moderated events.
+On restart, the engine restores the current checkpoint. In production, auto-start and continuous mode default to enabled even if an existing Render service has not synchronized the new blueprint variables; keep `QUIZ_AUTO_START=true` and `QUIZ_CONTINUOUS=true` explicit in provider configuration for auditable diagnostics. Every active room receives a fresh `OPEN` deadline, topic transitions remain automatic, the final topic wraps to the first, the legacy fallback bank wraps to question one, and newly created rooms start immediately. Set both flags explicitly to `false` for an emergency manual-control deployment. Development keeps the legacy manual-start behavior unless the flags are enabled.
 
 ### Persistence Drivers
 
