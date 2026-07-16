@@ -2,6 +2,8 @@ import { Router } from "express";
 import { allowedOrigins } from "../config/cors";
 import { getPersistenceStatus } from "../state/persistence";
 import { isJoinTokenConfigured } from "../security/joinToken";
+import { isAccountIdentityConfigured, isAccountIdentityEnabled } from "../security/accountIdentity";
+import { isQuizAutoStartEnabled, isQuizContinuousEnabled } from "../config/quizRuntime";
 
 const router = Router();
 
@@ -17,11 +19,19 @@ router.get("/", (_req, res) => {
     readiness: {
       adminAuthentication: Boolean(process.env.ADMIN_TOKEN?.trim()),
       playerAuthentication: isJoinTokenConfigured() || process.env.NODE_ENV !== "production",
+      accountIdentityExchange: !isAccountIdentityEnabled() || isAccountIdentityConfigured(),
+      quizAutoStart: isQuizAutoStartEnabled(),
+      quizContinuous: isQuizContinuousEnabled(),
       persistence: persistence.configured,
       persistenceDriver: persistence.driver,
       corsOriginCount: allowedOrigins.length,
       githubContentSync: Boolean((process.env.GITHUB_CONTENT_OWNER ?? process.env.GITHUB_OWNER)?.trim()),
       youtubeIntegration: Boolean(process.env.YOUTUBE_API_KEY?.trim()),
+    },
+    features: {
+      accountIdentityExchange: isAccountIdentityEnabled(),
+      quizAutoStart: isQuizAutoStartEnabled(),
+      quizContinuous: isQuizContinuousEnabled(),
     },
   });
 });

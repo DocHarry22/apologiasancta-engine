@@ -39,6 +39,17 @@ export interface PersistenceStatus {
   lastRestoreSucceeded: boolean;
 }
 
+export interface PersistenceMutation<T> {
+  value: T;
+  /** Finalize process-local guards after the snapshot is durable. Must not throw. */
+  commit?: () => void;
+  rollback: () => void;
+}
+
+export type PersistedMutationOutcome<T> =
+  | { persisted: true; value: T }
+  | { persisted: false };
+
 let stateFilePathOverride: string | null = null;
 let stateDbPathOverride: string | null = null;
 let databaseUrlOverride: string | null = null;
@@ -364,6 +375,49 @@ export async function flushPersistence(): Promise<boolean> {
     throw error;
   }
   return true;
+}
+
+/**
+ * Serialize a narrow in-memory mutation with the snapshot write that makes it
+ * durable. The mutation is not applied when persistence is unavailable. If the
+ * write rejects, rollback runs before any later queued snapshot can observe the
+ * failed mutation. Mutations scheduled while the write is in flight remain
+ * queued behind it and therefore observe either the committed or rolled-back
+ * state.
+ */
+export async function runPersistedMutation<T>(
+  createMutation: () => PersistenceMutation<T>
+): Promise<PersistedMutationOutcome<T>> {
+  const config = persistenceConfig;
+  if (!config) return { persisted: false };
+
+  writesInFlight += 1;
+  const operation = writeChain.then(async () => {
+    const mutation = createMutation();
+    try {
+      await persistNow(config);
+    } catch (error) {
+      try {
+        mutation.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "[Persistence] Failed to roll back rejected state mutation:",
+          rollbackError instanceof Error ? rollbackError.message : rollbackError
+        );
+        throw new AggregateError([error, rollbackError], "Persistence write and mutation rollback both failed");
+      }
+      throw error;
+    }
+    mutation.commit?.();
+    return mutation.value;
+  });
+
+  writeChain = operation.then(() => undefined, () => undefined);
+  void operation.finally(() => {
+    writesInFlight -= 1;
+  }).catch(() => undefined);
+
+  return { persisted: true, value: await operation };
 }
 
 export async function shutdownPersistence(options: { flush?: boolean } = {}): Promise<boolean> {

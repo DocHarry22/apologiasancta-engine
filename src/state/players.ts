@@ -8,8 +8,9 @@
 import { randomUUID } from "crypto";
 import { calculateScoreDetails } from "../engine/scoring";
 import { DEFAULT_ROOM_ID, getRoomName } from "./rooms";
-import { schedulePersistence } from "./persistence";
+import { schedulePersistence, type PersistenceMutation } from "./persistence";
 import type { Leaderboard, LeaderboardPeriod, PlayerInfo } from "../types/quiz";
+import { isValidPublicDisplayName, normalizePublicDisplayName } from "../security/publicDisplayName";
 
 export interface PlayerAnswer {
   choiceId: string;
@@ -23,11 +24,21 @@ export interface Player {
   registeredAt: number;
 }
 
+export interface AccountIdentityMapping {
+  issuer: string;
+  subject: string;
+  userId: string;
+  createdAt: number;
+  lastExchangedAt: number;
+}
+
+export const ACCOUNT_DISPLAY_NAME_MANAGED_REASON = "account_display_name_managed";
+
 export interface RegisterResult {
   ok: boolean;
   userId?: string;
   username?: string;
-  reason?: "invalid_username" | "username_taken" | "invalid_format";
+  reason?: "invalid_username" | "username_taken" | "invalid_format" | typeof ACCOUNT_DISPLAY_NAME_MANAGED_REASON;
   message?: string;
 }
 
@@ -57,6 +68,8 @@ interface RoomPlayerState {
 
 export interface PersistedPlayersSnapshot {
   players: Player[];
+  /** Added in July 2026; optional so pre-identity snapshots restore unchanged. */
+  accountIdentities?: AccountIdentityMapping[];
   roomStates: Array<{
     roomId: string;
     playerStates: Array<{ userId: string; score: number; streak: number }>;
@@ -67,8 +80,13 @@ export interface PersistedPlayersSnapshot {
 
 const players: Map<string, Player> = new Map();
 const usernameToUserId: Map<string, string> = new Map();
+const accountIdentities: Map<string, AccountIdentityMapping> = new Map();
+const accountLinkedUserIds: Set<string> = new Set();
 const roomStates: Map<string, RoomPlayerState> = new Map();
-const USERNAME_REGEX = /^[a-zA-Z0-9_]{3,20}$/;
+
+function accountIdentityKey(issuer: string, subject: string): string {
+  return `${issuer}\u0000${subject}`;
+}
 
 function getRoomState(roomId: string): RoomPlayerState {
   let roomState = roomStates.get(roomId);
@@ -250,16 +268,16 @@ export function getLeaderboardForPeriod(
   };
 }
 
-function normalizeUsername(raw: string): string {
-  return raw.trim().replace(/\s+/g, "_").slice(0, 20);
-}
-
 export function isValidUsername(username: string): boolean {
-  return USERNAME_REGEX.test(username);
+  return isValidPublicDisplayName(username);
 }
 
-export function registerPlayer(requestedUsername: string, providedUserId?: string): RegisterResult {
-  const username = normalizeUsername(requestedUsername);
+function registerPlayerWithAuthority(
+  requestedUsername: string,
+  providedUserId?: string,
+  allowAccountDisplayNameChange = false
+): RegisterResult {
+  const username = normalizePublicDisplayName(requestedUsername);
   const usernameLower = username.toLowerCase();
 
   if (!isValidUsername(username)) {
@@ -270,10 +288,31 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
     };
   }
 
+  const existingPlayer = providedUserId ? players.get(providedUserId) : undefined;
+  if (
+    existingPlayer
+    && accountLinkedUserIds.has(existingPlayer.userId)
+    && existingPlayer.username !== username
+    && !allowAccountDisplayNameChange
+  ) {
+    return {
+      ok: false,
+      reason: ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
+      message: "Account-linked display names can only be changed through /identity/exchange",
+    };
+  }
+
   const existingUserId = usernameToUserId.get(usernameLower);
   if (existingUserId) {
     if (providedUserId && existingUserId === providedUserId) {
       const player = players.get(providedUserId)!;
+      if (allowAccountDisplayNameChange && player.username !== username) {
+        const updatedPlayer = { ...player, username, usernameLower };
+        players.set(providedUserId, updatedPlayer);
+        schedulePersistence();
+        console.log(`[Players] Registered: ${username} (${providedUserId})`);
+        return { ok: true, userId: providedUserId, username };
+      }
       return { ok: true, userId: providedUserId, username: player.username };
     }
 
@@ -285,13 +324,13 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
   }
 
   const userId = providedUserId || randomUUID();
-  const existingPlayer = players.get(userId);
-  if (existingPlayer && existingPlayer.usernameLower !== usernameLower) {
-    usernameToUserId.delete(existingPlayer.usernameLower);
+  const currentPlayer = existingPlayer ?? players.get(userId);
+  if (currentPlayer && currentPlayer.usernameLower !== usernameLower) {
+    usernameToUserId.delete(currentPlayer.usernameLower);
   }
 
-  const player: Player = existingPlayer
-    ? { ...existingPlayer, username, usernameLower }
+  const player: Player = currentPlayer
+    ? { ...currentPlayer, username, usernameLower }
     : {
         userId,
         username,
@@ -307,6 +346,11 @@ export function registerPlayer(requestedUsername: string, providedUserId?: strin
   return { ok: true, userId, username };
 }
 
+/** Guest/player-session registration never has authority to rename an account identity. */
+export function registerPlayer(requestedUsername: string, providedUserId?: string): RegisterResult {
+  return registerPlayerWithAuthority(requestedUsername, providedUserId);
+}
+
 export function isRegistered(userId: string): boolean {
   return players.has(userId);
 }
@@ -319,6 +363,180 @@ export function getPlayer(userId: string): Player | undefined {
   return players.get(userId);
 }
 
+export interface ResolveAccountPlayerResult extends RegisterResult {
+  identityCreated?: boolean;
+  displayNameAdjusted?: boolean;
+}
+
+function accountCollisionFallback(displayName: string, userId: string): string {
+  const suffix = userId.replace(/[^a-zA-Z0-9]/g, "").slice(-6);
+  return `${displayName.slice(0, 13)}_${suffix}`;
+}
+
+/**
+ * Resolve an account authority's opaque subject to an Engine-owned opaque ID.
+ * The external subject never becomes a public player ID or leaderboard field.
+ */
+function resolveAccountPlayer(
+  issuer: string,
+  subject: string,
+  requestedDisplayName: string,
+  nowMs = Date.now()
+): ResolveAccountPlayerResult {
+  const key = accountIdentityKey(issuer, subject);
+  const existingMapping = accountIdentities.get(key);
+
+  if (existingMapping) {
+    const existingPlayer = players.get(existingMapping.userId);
+    // Trusted account-resolution path; its HTTP caller verifies the backend assertion first.
+    const update = registerPlayerWithAuthority(requestedDisplayName, existingMapping.userId, true);
+    existingMapping.lastExchangedAt = nowMs;
+    schedulePersistence();
+
+    if (!update.ok && update.reason === "username_taken" && existingPlayer) {
+      return {
+        ok: true,
+        userId: existingPlayer.userId,
+        username: existingPlayer.username,
+        identityCreated: false,
+        displayNameAdjusted: true,
+      };
+    }
+    return { ...update, identityCreated: false, displayNameAdjusted: false };
+  }
+
+  const userId = `acct_${randomUUID()}`;
+  let registration = registerPlayer(requestedDisplayName, userId);
+  let displayNameAdjusted = false;
+  if (!registration.ok && registration.reason === "username_taken") {
+    registration = registerPlayer(accountCollisionFallback(requestedDisplayName, userId), userId);
+    displayNameAdjusted = registration.ok;
+  }
+  if (!registration.ok || !registration.userId || !registration.username) return registration;
+
+  accountIdentities.set(key, {
+    issuer,
+    subject,
+    userId,
+    createdAt: nowMs,
+    lastExchangedAt: nowMs,
+  });
+  accountLinkedUserIds.add(userId);
+  schedulePersistence();
+  console.log(`[Players] Account identity linked: issuer=${issuer} userId=${userId}`);
+  return { ...registration, identityCreated: true, displayNameAdjusted };
+}
+
+function accountIdentityReferencesUser(userId: string): boolean {
+  return [...accountIdentities.values()].some((mapping) => mapping.userId === userId);
+}
+
+/**
+ * Apply account resolution with an identity-scoped undo record. Rollback uses
+ * object identity checks so a concurrent mutation of the same player is never
+ * overwritten, and it never restores the full player collection.
+ */
+export function beginAccountPlayerResolution(
+  issuer: string,
+  subject: string,
+  requestedDisplayName: string,
+  nowMs = Date.now()
+): PersistenceMutation<ResolveAccountPlayerResult> {
+  const key = accountIdentityKey(issuer, subject);
+  const previousMapping = accountIdentities.get(key);
+  const previousMappingSnapshot = previousMapping ? { ...previousMapping } : undefined;
+  const previousUserId = previousMapping?.userId;
+  const previousPlayer = previousUserId ? players.get(previousUserId) : undefined;
+  const previousWasLinked = previousUserId ? accountLinkedUserIds.has(previousUserId) : false;
+
+  const result = resolveAccountPlayer(issuer, subject, requestedDisplayName, nowMs);
+  const appliedUserId = result.userId;
+  const appliedPlayer = appliedUserId ? players.get(appliedUserId) : undefined;
+  const appliedMapping = accountIdentities.get(key);
+  let previousNameReserved = false;
+  if (
+    appliedUserId
+    && previousPlayer
+    && appliedPlayer
+    && previousPlayer.usernameLower !== appliedPlayer.usernameLower
+    && usernameToUserId.get(previousPlayer.usernameLower) === undefined
+  ) {
+    // registerPlayer releases the old canonical name synchronously. Hold it as
+    // a process-local alias until the persistence decision so a guest cannot
+    // claim it while rollback may still need to restore the account.
+    usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+    previousNameReserved = true;
+  }
+
+  return {
+    value: result,
+    commit: () => {
+      if (!previousNameReserved || !appliedUserId || !previousPlayer) return;
+      const currentPlayer = players.get(appliedUserId);
+      if (
+        currentPlayer?.usernameLower !== previousPlayer.usernameLower
+        && usernameToUserId.get(previousPlayer.usernameLower) === appliedUserId
+      ) {
+        usernameToUserId.delete(previousPlayer.usernameLower);
+      }
+    },
+    rollback: () => {
+      let changed = false;
+
+      if (appliedUserId && appliedPlayer && players.get(appliedUserId) === appliedPlayer) {
+        const previousNameOwner = previousPlayer
+          ? usernameToUserId.get(previousPlayer.usernameLower)
+          : undefined;
+        if (!previousPlayer || !previousNameOwner || previousNameOwner === appliedUserId) {
+          if (usernameToUserId.get(appliedPlayer.usernameLower) === appliedUserId) {
+            usernameToUserId.delete(appliedPlayer.usernameLower);
+          }
+          if (previousPlayer) {
+            players.set(appliedUserId, previousPlayer);
+            usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+          } else {
+            players.delete(appliedUserId);
+          }
+          changed = true;
+        }
+      }
+
+      let mappingRolledBack = false;
+      if (appliedMapping && accountIdentities.get(key) === appliedMapping) {
+        if (previousMappingSnapshot) accountIdentities.set(key, previousMappingSnapshot);
+        else accountIdentities.delete(key);
+        mappingRolledBack = true;
+        changed = true;
+      }
+
+      if (appliedUserId && mappingRolledBack) {
+        if (previousWasLinked) accountLinkedUserIds.add(appliedUserId);
+        else if (!accountIdentityReferencesUser(appliedUserId)) accountLinkedUserIds.delete(appliedUserId);
+      }
+
+      if (previousNameReserved && appliedUserId && previousPlayer) {
+        const currentPlayer = players.get(appliedUserId);
+        if (currentPlayer?.usernameLower === previousPlayer.usernameLower) {
+          usernameToUserId.set(previousPlayer.usernameLower, appliedUserId);
+        } else if (usernameToUserId.get(previousPlayer.usernameLower) === appliedUserId) {
+          usernameToUserId.delete(previousPlayer.usernameLower);
+        }
+      }
+
+      if (changed) schedulePersistence();
+    },
+  };
+}
+
+export function getAccountIdentityMapping(issuer: string, subject: string): AccountIdentityMapping | undefined {
+  const mapping = accountIdentities.get(accountIdentityKey(issuer, subject));
+  return mapping ? { ...mapping } : undefined;
+}
+
+export function isAccountLinkedPlayer(userId: string): boolean {
+  return accountLinkedUserIds.has(userId);
+}
+
 function getChannelIdSuffix(userId: string): string {
   const channelId = userId.startsWith("yt:") ? userId.slice(3) : userId;
   return channelId.slice(-4);
@@ -328,8 +546,8 @@ export function getOrCreatePlayer(userId: string, displayName: string): Player {
   let player = players.get(userId);
 
   if (player) {
-    if (userId.startsWith("yt:")) {
-      const normalizedNew = normalizeUsername(displayName);
+    if (userId.startsWith("yt:") && !accountLinkedUserIds.has(userId)) {
+      const normalizedNew = normalizePublicDisplayName(displayName);
       if (player.username !== normalizedNew && player.usernameLower !== normalizedNew.toLowerCase()) {
         const newLower = normalizedNew.toLowerCase();
         const existingOwner = usernameToUserId.get(newLower);
@@ -351,7 +569,7 @@ export function getOrCreatePlayer(userId: string, displayName: string): Player {
   }
 
   const suffix = getChannelIdSuffix(userId);
-  const disambiguated = `${normalizeUsername(displayName).slice(0, 15)}#${suffix}`;
+  const disambiguated = `${normalizePublicDisplayName(displayName).slice(0, 15)}#${suffix}`;
   const altResult = registerPlayer(disambiguated, userId);
   if (altResult.ok) {
     player = players.get(userId)!;
@@ -371,6 +589,39 @@ export function initializePlayerRoom(userId: string, roomId: string = DEFAULT_RO
     return;
   }
   getOrCreatePlayerRoomState(roomId, userId);
+}
+
+export function beginPlayerRoomInitialization(
+  userId: string,
+  roomId: string = DEFAULT_ROOM_ID
+): PersistenceMutation<void> {
+  const previousRoomState = roomStates.get(roomId);
+  const previousPlayerState = previousRoomState?.playerStates.get(userId);
+  initializePlayerRoom(userId, roomId);
+  const appliedRoomState = roomStates.get(roomId);
+  const appliedPlayerState = appliedRoomState?.playerStates.get(userId);
+
+  return {
+    value: undefined,
+    rollback: () => {
+      if (previousPlayerState || !appliedRoomState || !appliedPlayerState) return;
+      const currentRoomState = roomStates.get(roomId);
+      if (currentRoomState !== appliedRoomState || currentRoomState.playerStates.get(userId) !== appliedPlayerState) return;
+      if (appliedPlayerState.score !== 0 || appliedPlayerState.streak !== 0) return;
+
+      currentRoomState.playerStates.delete(userId);
+      if (
+        !previousRoomState
+        && currentRoomState.playerStates.size === 0
+        && currentRoomState.questionAnswers.size === 0
+        && currentRoomState.playerCorrectCounts.size === 0
+        && currentRoomState.scoreEvents.length === 0
+      ) {
+        roomStates.delete(roomId);
+      }
+      schedulePersistence();
+    },
+  };
 }
 
 export function submitAnswerForRegistered(
@@ -546,6 +797,8 @@ export function clearAllAnswers(roomId?: string): void {
 export function resetAllPlayers(): void {
   players.clear();
   usernameToUserId.clear();
+  accountIdentities.clear();
+  accountLinkedUserIds.clear();
   roomStates.clear();
   schedulePersistence();
   console.log("[Players] All player data reset");
@@ -710,6 +963,7 @@ export function resetScoresAndStreaks(roomId: string = DEFAULT_ROOM_ID): void {
 export function getPlayersPersistenceSnapshot(): PersistedPlayersSnapshot {
   return {
     players: [...players.values()],
+    accountIdentities: [...accountIdentities.values()].map((mapping) => ({ ...mapping })),
     roomStates: [...roomStates.entries()].map(([roomId, roomState]) => ({
       roomId,
       playerStates: [...roomState.playerStates.entries()].map(([userId, playerState]) => ({
@@ -730,6 +984,8 @@ export function getPlayersPersistenceSnapshot(): PersistedPlayersSnapshot {
 export function hydratePlayersPersistenceSnapshot(snapshot: PersistedPlayersSnapshot | null | undefined): void {
   players.clear();
   usernameToUserId.clear();
+  accountIdentities.clear();
+  accountLinkedUserIds.clear();
   roomStates.clear();
 
   if (!snapshot) {
@@ -739,6 +995,13 @@ export function hydratePlayersPersistenceSnapshot(snapshot: PersistedPlayersSnap
   for (const player of snapshot.players || []) {
     players.set(player.userId, player);
     usernameToUserId.set(player.usernameLower, player.userId);
+  }
+
+  for (const mapping of snapshot.accountIdentities || []) {
+    if (!mapping || typeof mapping.issuer !== "string" || typeof mapping.subject !== "string") continue;
+    if (typeof mapping.userId !== "string" || !players.has(mapping.userId)) continue;
+    accountIdentities.set(accountIdentityKey(mapping.issuer, mapping.subject), { ...mapping });
+    accountLinkedUserIds.add(mapping.userId);
   }
 
   for (const persistedRoomState of snapshot.roomStates || []) {

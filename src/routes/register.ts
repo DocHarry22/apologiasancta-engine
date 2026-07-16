@@ -1,10 +1,13 @@
 import { Router, type Request, type Response } from "express";
 import { createRateLimit, stopRateLimitCleanup } from "../middleware/rateLimit";
-import { requirePlayerAuthorization } from "../security/playerAuthorization";
+import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
+import { normalizePublicDisplayName } from "../security/publicDisplayName";
 import {
+  ACCOUNT_DISPLAY_NAME_MANAGED_REASON,
   getPlayer,
   getPlayerInfo,
+  isAccountLinkedPlayer,
   getPlayerRank,
   initializePlayerRoom,
   isUsernameTaken,
@@ -26,6 +29,12 @@ export const registrationRateLimit = createRateLimit({
 
 type RegisterBody = { username?: unknown; userId?: unknown; roomId?: unknown };
 type RenameBody = { userId?: unknown; newUsername?: unknown; roomId?: unknown };
+
+function registrationFailureStatus(reason: string | undefined): number {
+  if (reason === ACCOUNT_DISPLAY_NAME_MANAGED_REASON) return 403;
+  if (reason === "username_taken") return 409;
+  return 400;
+}
 
 function routeParam(value: string | string[]): string {
   return Array.isArray(value) ? value[0] ?? "" : value;
@@ -65,12 +74,24 @@ export function handleRegister(req: Request, res: Response, roomId: string): voi
       allowExpired: true,
     });
     if (!authorization) return;
+    if (isExpiredJoinTokenPayload(authorization)) {
+      const currentPlayer = getPlayer(body.userId);
+      const requestedName = normalizePublicDisplayName(body.username);
+      if (isAccountLinkedPlayer(body.userId) || !currentPlayer || authorization.displayName !== currentPlayer.username || requestedName !== currentPlayer.username) {
+        res.status(401).json({
+          ok: false,
+          reason: "join_token_expired",
+          error: "Your room session expired. Rejoin with the same display name or sign in again.",
+        });
+        return;
+      }
+    }
     authorizedUserId = body.userId;
   }
 
   const result = registerPlayer(body.username, authorizedUserId);
   if (!result.ok || !result.userId || !result.username) {
-    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
+    res.status(registrationFailureStatus(result.reason)).json(result);
     return;
   }
   initializePlayerRoom(result.userId, roomId);
@@ -89,7 +110,7 @@ function handleMe(req: Request, res: Response, roomId: string): void {
     res.status(400).json({ ok: false, reason: "missing_user_id", error: "userId is required" });
     return;
   }
-  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true, allowExpired: true });
+  const authorization = requirePlayerAuthorization(req, res, { userId, allowDifferentRoom: true });
   if (!authorization) return;
   const player = getPlayer(userId);
   if (!player) {
@@ -133,7 +154,7 @@ function handleRename(req: Request, res: Response, roomId: string): void {
     res.status(400).json({ ok: false, reason: "invalid_format", error: "userId and newUsername are required" });
     return;
   }
-  const authorization = requirePlayerAuthorization(req, res, { userId: body.userId, allowDifferentRoom: true, allowExpired: true });
+  const authorization = requirePlayerAuthorization(req, res, { userId: body.userId, allowDifferentRoom: true });
   if (!authorization) return;
   if (!getPlayer(body.userId)) {
     res.status(404).json({ ok: false, reason: "not_registered", error: "Player not found" });
@@ -141,7 +162,7 @@ function handleRename(req: Request, res: Response, roomId: string): void {
   }
   const result = registerPlayer(body.newUsername, body.userId);
   if (!result.ok || !result.userId || !result.username) {
-    res.status(result.reason === "username_taken" ? 409 : 400).json(result);
+    res.status(registrationFailureStatus(result.reason)).json(result);
     return;
   }
   initializePlayerRoom(result.userId, roomId);

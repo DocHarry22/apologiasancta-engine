@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { access, mkdir, rm } from "node:fs/promises";
 import { getActivePoolSize, getTotalBankSize, ingestQuestions } from "./content/bank";
-import { start, pause, skipToNext, startNextTopic, getStatus, getAnswerWindowStatus } from "./engine/roundController";
+import {
+  start,
+  pause,
+  skipToNext,
+  startNextTopic,
+  getStatus,
+  getAnswerWindowStatus,
+  getPendingNextTopic,
+  startAutomaticQuizRuntime,
+  startAutomaticQuizRuntimeForRoom,
+} from "./engine/roundController";
 import {
   evaluateAnswers,
   getLeaderboardForPeriod,
@@ -15,6 +25,7 @@ import { createRoom, getRoom, joinRoom } from "./state/rooms";
 import { signJoinToken, validateProductionJoinSecret, verifyJoinToken } from "./security/joinToken";
 import { resolveAllowedOrigins } from "./config/cors";
 import { resolveRateLimitSettings } from "./middleware/rateLimit";
+import { setTopicSequenceConfig } from "./config/topicSequence";
 import {
   DEFAULT_REGISTRATION_RATE_LIMIT_MAX,
   DEFAULT_REGISTRATION_RATE_LIMIT_WINDOW_MS,
@@ -399,6 +410,82 @@ test("sqlite persistence restore keeps room scores and checkpoint while resuming
     assert.equal(restoredStatus.questionIndex, 1);
     assert.equal(restoredStatus.endsAtMs, 0);
   } finally {
+    await resetPersistenceState();
+    await temp.cleanup();
+  }
+});
+
+test("continuous runtime loops the built-in fallback bank when no topic content exists", () => {
+  const previousAutoStart = process.env.QUIZ_AUTO_START;
+  const previousContinuous = process.env.QUIZ_CONTINUOUS;
+  process.env.QUIZ_AUTO_START = "true";
+  process.env.QUIZ_CONTINUOUS = "true";
+
+  try {
+    const room = createRoom("Continuous Fallback", "continuous-fallback");
+    assert.equal(startAutomaticQuizRuntimeForRoom(room.roomId), true);
+    const questionCount = getStatus(room.roomId).totalQuestions;
+    for (let index = 0; index < questionCount; index += 1) {
+      skipToNext(room.roomId);
+    }
+    assert.equal(getStatus(room.roomId).questionIndex, 0);
+    assert.equal(getStatus(room.roomId).running, true);
+    assert.equal(getStatus(room.roomId).endsAtMs > Date.now(), true);
+  } finally {
+    if (previousAutoStart === undefined) delete process.env.QUIZ_AUTO_START;
+    else process.env.QUIZ_AUTO_START = previousAutoStart;
+    if (previousContinuous === undefined) delete process.env.QUIZ_CONTINUOUS;
+    else process.env.QUIZ_CONTINUOUS = previousContinuous;
+  }
+});
+
+test("continuous runtime resumes restored rooms, starts new rooms, and loops the topic series", async () => {
+  const previousAutoStart = process.env.QUIZ_AUTO_START;
+  const previousContinuous = process.env.QUIZ_CONTINUOUS;
+  const temp = await createTempStateFilePath();
+  configurePersistenceForTests(temp.filePath);
+  process.env.QUIZ_AUTO_START = "true";
+  process.env.QUIZ_CONTINUOUS = "true";
+
+  try {
+    const restoredRoom = createRoom("Continuous Restore", "continuous-restore");
+    ingestQuestions([
+      buildQuestion("continuous-a", "topic-continuous-a", "Continuous A"),
+      buildQuestion("continuous-b", "topic-continuous-b", "Continuous B"),
+    ]);
+    setTopicSequenceConfig({
+      topicSequence: ["topic-continuous-a", "topic-continuous-b"],
+      autoAdvance: false,
+      seriesLoopMode: "off",
+    }, restoredRoom.roomId);
+    startNextTopic("topic-continuous-b", restoredRoom.roomId);
+    start(restoredRoom.roomId);
+    pause(restoredRoom.roomId);
+    await flushPersistence();
+
+    resetRuntimeState();
+    assert.equal(await restoreConfiguredPersistence(), true);
+    assert.equal(getStatus(restoredRoom.roomId).running, false);
+
+    const startedRooms = startAutomaticQuizRuntime();
+    assert.equal(startedRooms.includes(restoredRoom.roomId), true);
+    assert.equal(getStatus(restoredRoom.roomId).running, true);
+    assert.equal(getStatus(restoredRoom.roomId).endsAtMs > Date.now(), true);
+
+    skipToNext(restoredRoom.roomId);
+    assert.equal(getStatus(restoredRoom.roomId).inTopicSummary, true);
+    assert.equal(getPendingNextTopic(restoredRoom.roomId), "topic-continuous-a");
+
+    const newRoom = createRoom("Continuous New Room", "continuous-new");
+    assert.equal(startAutomaticQuizRuntimeForRoom(newRoom.roomId), true);
+    assert.equal(getStatus(newRoom.roomId).running, true);
+    assert.equal(getStatus(newRoom.roomId).endsAtMs > Date.now(), true);
+    assert.equal(getStatus(newRoom.roomId).currentTopicId, "topic-continuous-a");
+  } finally {
+    if (previousAutoStart === undefined) delete process.env.QUIZ_AUTO_START;
+    else process.env.QUIZ_AUTO_START = previousAutoStart;
+    if (previousContinuous === undefined) delete process.env.QUIZ_CONTINUOUS;
+    else process.env.QUIZ_CONTINUOUS = previousContinuous;
     await resetPersistenceState();
     await temp.cleanup();
   }

@@ -1,5 +1,5 @@
 import type { RoomMembership, RoomSummary } from "../types/quiz";
-import { schedulePersistence } from "./persistence";
+import { schedulePersistence, type PersistenceMutation } from "./persistence";
 
 interface RoomRecord extends RoomSummary {
   createdAt: number;
@@ -198,6 +198,22 @@ export function joinRoom(roomId: string, userId: string): RoomMembership {
   syncRoomPlayerCount(roomId);
   schedulePersistence();
   return membership;
+}
+
+export function beginRoomJoin(roomId: string, userId: string): PersistenceMutation<RoomMembership> {
+  const memberships = getMemberships(roomId);
+  const previousMembership = memberships.get(userId);
+  const membership = joinRoom(roomId, userId);
+
+  return {
+    value: membership,
+    rollback: () => {
+      if (previousMembership || memberships.get(userId) !== membership) return;
+      memberships.delete(userId);
+      syncRoomPlayerCount(roomId);
+      schedulePersistence();
+    },
+  };
 }
 
 export function leaveRoom(roomId: string, userId: string): boolean {

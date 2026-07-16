@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolve } from "node:path";
+import { isQuizAutoStartEnabled, isQuizContinuousEnabled } from "./config/quizRuntime";
 
 const repositoryRoot = resolve(__dirname, "..");
 
@@ -14,7 +15,17 @@ test("Render installs build tooling and uses managed PostgreSQL", async () => {
   assert.match(blueprint, /key:\s*PLAYER_JOIN_SECRET\s*\n\s*sync:\s*false/);
   assert.match(blueprint, /key:\s*RATE_LIMIT_REGISTER_MAX\s*\n\s*value:\s*"120"/);
   assert.match(blueprint, /key:\s*RATE_LIMIT_REGISTER_WINDOW_MS\s*\n\s*value:\s*"600000"/);
+  assert.match(blueprint, /key:\s*QUIZ_AUTO_START\s*\n\s*value:\s*"true"/);
+  assert.match(blueprint, /key:\s*QUIZ_CONTINUOUS\s*\n\s*value:\s*"true"/);
   assert.doesNotMatch(blueprint, /key:\s*STATE_DB_PATH/);
+});
+
+test("continuous mode implies automatic startup while explicit flags remain strict", () => {
+  assert.equal(isQuizContinuousEnabled({ QUIZ_CONTINUOUS: "true" }), true);
+  assert.equal(isQuizAutoStartEnabled({ QUIZ_CONTINUOUS: "true" }), true);
+  assert.equal(isQuizAutoStartEnabled({ QUIZ_AUTO_START: "true" }), true);
+  assert.equal(isQuizAutoStartEnabled({ QUIZ_AUTO_START: "1" }), false);
+  assert.equal(isQuizContinuousEnabled({ QUIZ_CONTINUOUS: "false" }), false);
 });
 
 test("environment examples never provide a copyable player-secret placeholder", async () => {

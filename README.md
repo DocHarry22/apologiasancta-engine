@@ -8,6 +8,8 @@ Deployed on Render: `https://apologiasancta-engine.onrender.com`
 
 The production blueprint now uses PostgreSQL atomic runtime snapshots and no longer provisions an unused Redis service. Player registration issues an HMAC-signed, expiring room token; join, leave, rename and answer routes enforce that identity, while expired signed sessions may be refreshed by rejoining. Production rejects placeholder player secrets and requires at least 32 random bytes. It also has strict origin resolution, classroom-safe configurable registration limits, request IDs, bounded bodies and a non-secret `/diagnostics` readiness endpoint.
 
+An opt-in account identity exchange now lets the authenticated Next.js server map its opaque account subject to a durable Engine-owned player ID. The shared HMAC secret stays backend-only, assertions expire quickly and are room-bound, exact retries are idempotent, and nonce reuse with different signed content is rejected. Guest registration and existing room join tokens remain supported, but an account-linked display name can only change through a fresh backend assertion. See [`docs/ACCOUNT_IDENTITY_ROLLOUT.md`](docs/ACCOUNT_IDENTITY_ROLLOUT.md) before enabling it.
+
 `ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Configure the latter on Render before deploying this branch. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
 
 ## Current State (v1 — May 2026)
@@ -22,7 +24,8 @@ The engine is live on Render and serving production traffic. All core game mecha
 - Time-based scoring with difficulty multipliers and streak tracking
 - Daily, weekly, and all-time leaderboard windows
 - YouTube Live Chat polling for `!A` / `!B` / `!C` / `!D` answers
-- Restart recovery restoring the checkpoint in **paused** mode (no mid-round auto-resume)
+- Restart recovery restoring the checkpoint and automatically reopening active rooms when `QUIZ_AUTO_START=true`
+- Continuous production rotation across phases, topics, and the full topic series when `QUIZ_CONTINUOUS=true`
 - Runtime persistence: JSON-file, SQLite and managed PostgreSQL snapshot drivers
 - CI pipeline on GitHub Actions: Node 22 typecheck, tests, and build on every push
 
@@ -46,7 +49,7 @@ The engine is live on Render and serving production traffic. All core game mecha
 - Room-scoped leaderboard endpoints for `daily`, `weekly`, and `all-time`
 - Time-based scoring with difficulty multipliers and streak tracking
 - Runtime persistence for content, room registry, memberships, players, score history, and controller checkpoints
-- Restart restore that clears transient congrats/countdown transitions and waits for an admin resume
+- Restart restore that clears stale transient timers and reopens every active room with a fresh server-authoritative answer window
 - YouTube Live Chat polling for `!A`, `!B`, `!C`, and `!D` answers
 - Content/topic management endpoints used by the authoring UI
 - Backend verification suite runnable with `npm test`
@@ -109,6 +112,8 @@ PLAYER_JOIN_SECRET=
 # Classroom-safe registration defaults; tune upward for larger events.
 RATE_LIMIT_REGISTER_MAX=120
 RATE_LIMIT_REGISTER_WINDOW_MS=600000
+RATE_LIMIT_IDENTITY_EXCHANGE_MAX=6000
+RATE_LIMIT_IDENTITY_EXCHANGE_WINDOW_MS=600000
 
 # YouTube integration (optional)
 YOUTUBE_API_KEY=AIza...your_key
@@ -118,6 +123,11 @@ YOUTUBE_VIDEO_ID=optional_default_video_id
 OPEN_SECONDS=25
 LOCK_SECONDS=2
 REVEAL_SECONDS=12
+
+# Continuous production runtime. Continuous mode implies auto-start, loops the
+# full topic series, and applies to rooms created after startup.
+QUIZ_AUTO_START=true
+QUIZ_CONTINUOUS=true
 
 # Runtime persistence (PostgreSQL is recommended in production)
 # Default file-backed snapshot storage
@@ -165,9 +175,13 @@ npm start
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/register` | POST | Register a player in the default flow |
+| `/register/:roomId` | POST | Register or rejoin directly into a room |
+| `/register/rename` | POST | Rename a guest player with a current room token |
+| `/register/:roomId/rename` | POST | Rename a guest player and join the selected room |
 | `/register/me` | GET | Resolve a player and auto-rejoin their room |
 | `/register/rank` | GET | Player rank snapshot |
 | `/register/check` | GET | Username availability check |
+| `/identity/exchange` | POST | Backend-only exchange of a signed account assertion for a stable player session |
 | `/answer` | POST | Submit answer on the shared route |
 | `/answer/:roomId` | POST | Submit answer for a room |
 
@@ -245,7 +259,7 @@ Runtime snapshots include:
 - room registry and memberships
 - players, room scores, room streaks, and score event history
 
-On restart, the engine restores the current checkpoint in paused mode. It does not auto-resume timers mid-round.
+On restart, the engine restores the current checkpoint. With `QUIZ_AUTO_START=true`, every active room receives a fresh `OPEN` deadline instead of reusing a stale persisted timer. With `QUIZ_CONTINUOUS=true`, topic transitions remain automatic, the final topic wraps to the first, the legacy fallback bank wraps to question one, and newly created rooms start immediately. Without either flag, the legacy manual-start behavior remains available for development or moderated events.
 
 ### Persistence Drivers
 
@@ -262,7 +276,7 @@ If `STATE_PERSISTENCE_DRIVER` is unset and `STATE_DB_PATH` is present, the engin
 - room-scoped leaderboard windows and weekly rollover behavior
 - room lifecycle and closed-room gameplay rejection
 - SSE partitioning between rooms
-- persistence restore behavior and paused checkpoint recovery
+- persistence restore behavior, automatic active-room recovery, and continuous topic/legacy-bank looping
 
 `npx tsc --noEmit` is also expected to pass for the engine workspace.
 

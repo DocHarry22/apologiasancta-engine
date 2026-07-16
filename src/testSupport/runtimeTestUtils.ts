@@ -18,6 +18,7 @@ import {
 } from "../state/persistence";
 import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "../state/rooms";
 import { resetBrokerForTests } from "../sse/broker";
+import { resetIdentityExchangeForTests } from "../routes/identity";
 
 async function removeDirWithRetries(dir: string): Promise<void> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -51,6 +52,7 @@ export async function withPatchedNow<T>(nowMs: number, callback: () => Promise<T
 
 export function resetRuntimeState(): void {
   resetBrokerForTests();
+  resetIdentityExchangeForTests();
   clearBank();
   resetAllPlayers();
   hydrateTopicSequencePersistenceSnapshot(null);
