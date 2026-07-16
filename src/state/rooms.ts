@@ -145,6 +145,9 @@ export function closeRoom(roomId: string): RoomSummary {
   if (!room) {
     throw new Error("Room not found");
   }
+  if (!room.isActive) {
+    return getRoom(roomId)!;
+  }
 
   room.isActive = false;
   room.closedAt = Date.now();

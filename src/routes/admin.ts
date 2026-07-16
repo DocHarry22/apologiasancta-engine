@@ -29,7 +29,8 @@ import {
   setCountdownSeconds,
 } from "../config/topicSequence";
 import { flushPersistence, getPersistenceStatus } from "../state/persistence";
-import { DEFAULT_ROOM_ID, closeRoom, createRoom, listRooms, requireRoom } from "../state/rooms";
+import { DEFAULT_ROOM_ID, createRoom, listRooms, requireRoom } from "../state/rooms";
+import { closeGameplayRoom } from "../state/roomLifecycle";
 import { getClientCountForRoom } from "../sse/broker";
 import type { LoopMode } from "../types/quiz";
 
@@ -62,11 +63,15 @@ function getAdminRoomId(req: Request): string {
     : DEFAULT_ROOM_ID;
 }
 
-function resolveAdminRoom(req: Request, res: Response): string | null {
+function resolveAdminRoom(req: Request, res: Response, requireActive = false): string | null {
   const roomId = getAdminRoomId(req);
 
   try {
-    requireRoom(roomId);
+    const room = requireRoom(roomId);
+    if (requireActive && !room.isActive) {
+      res.status(409).json({ error: "Room is closed", roomId });
+      return null;
+    }
     return roomId;
   } catch {
     res.status(404).json({ error: "Room not found", roomId });
@@ -135,7 +140,10 @@ function startControllerForRoom(roomId: string, res: Response): void {
     return;
   }
 
-  start(roomId);
+  if (!start(roomId)) {
+    res.status(503).json({ error: "Controller start is unavailable while runtime initialization is pending", roomId });
+    return;
+  }
   res.json({
     success: true,
     message: "Controller started",
@@ -578,10 +586,11 @@ router.post("/rooms", (req: Request, res: Response) => {
 
 router.post("/rooms/:roomId/close", (req: Request<{ roomId: string }>, res: Response) => {
   try {
-    const room = closeRoom(req.params.roomId);
+    const { room, controllerDisposed } = closeGameplayRoom(req.params.roomId);
     return res.json({
       success: true,
       room,
+      controllerDisposed,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to close room";
@@ -600,7 +609,7 @@ router.get("/rooms/:roomId/status", (req: Request<{ roomId: string }>, res: Resp
 });
 
 router.post("/rooms/:roomId/start", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -609,7 +618,7 @@ router.post("/rooms/:roomId/start", (req: Request<{ roomId: string }>, res: Resp
 });
 
 router.post("/rooms/:roomId/resume", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -618,7 +627,7 @@ router.post("/rooms/:roomId/resume", (req: Request<{ roomId: string }>, res: Res
 });
 
 router.post("/rooms/:roomId/pause", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -627,7 +636,7 @@ router.post("/rooms/:roomId/pause", (req: Request<{ roomId: string }>, res: Resp
 });
 
 router.post("/rooms/:roomId/next", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -636,7 +645,7 @@ router.post("/rooms/:roomId/next", (req: Request<{ roomId: string }>, res: Respo
 });
 
 router.post("/rooms/:roomId/reset", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -645,7 +654,7 @@ router.post("/rooms/:roomId/reset", (req: Request<{ roomId: string }>, res: Resp
 });
 
 router.post("/rooms/:roomId/topic/next", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -706,7 +715,7 @@ router.get("/rooms/:roomId/topic/sequence", (req: Request<{ roomId: string }>, r
 });
 
 router.post("/rooms/:roomId/topic/sequence", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -721,7 +730,7 @@ router.post("/rooms/:roomId/topic/sequence", (req: Request<{ roomId: string }>, 
 });
 
 router.post("/rooms/:roomId/topic/loop", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -742,7 +751,7 @@ router.post("/rooms/:roomId/topic/loop", (req: Request<{ roomId: string }>, res:
 });
 
 router.post("/rooms/:roomId/series/loop", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -763,7 +772,7 @@ router.post("/rooms/:roomId/series/loop", (req: Request<{ roomId: string }>, res
 });
 
 router.post("/rooms/:roomId/countdown/set", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -788,7 +797,7 @@ router.post("/rooms/:roomId/countdown/set", (req: Request<{ roomId: string }>, r
 });
 
 router.post("/rooms/:roomId/topic/cancel-auto", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -808,7 +817,7 @@ router.post("/rooms/:roomId/topic/cancel-auto", (req: Request<{ roomId: string }
 });
 
 router.post("/rooms/:roomId/topic/start/:topicId", (req: Request<{ roomId: string; topicId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -832,7 +841,7 @@ router.post("/rooms/:roomId/topic/start/:topicId", (req: Request<{ roomId: strin
 });
 
 router.post("/rooms/:roomId/topic/skip", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -855,7 +864,7 @@ router.post("/rooms/:roomId/topic/skip", (req: Request<{ roomId: string }>, res:
 });
 
 router.post("/rooms/:roomId/topic/replay", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }
@@ -877,7 +886,7 @@ router.post("/rooms/:roomId/topic/replay", (req: Request<{ roomId: string }>, re
 });
 
 router.post("/rooms/:roomId/topic/countdown", (req: Request<{ roomId: string }>, res: Response) => {
-  const roomId = resolveAdminRoom(req, res);
+  const roomId = resolveAdminRoom(req, res, true);
   if (!roomId) {
     return;
   }

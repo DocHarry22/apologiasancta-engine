@@ -5,7 +5,7 @@
 import "dotenv/config";
 import type { Server } from "http";
 import { createApp, allowedOrigins } from "./app";
-import { syncFromGitHub, getSyncStatus, getGitHubSyncConfig } from "./content/github";
+import { syncFromGitHub, getGitHubSyncConfig } from "./content/github";
 import { getContentBankPersistenceSnapshot, hydrateContentBankPersistenceSnapshot } from "./content/bank";
 import {
   getTopicSequencePersistenceSnapshot,
@@ -14,6 +14,8 @@ import {
 import {
   getControllerPersistenceSnapshot,
   hydrateControllerPersistenceSnapshot,
+  holdQuizRuntimeStarts,
+  releaseQuizRuntimeStarts,
   startAutomaticQuizRuntime,
 } from "./engine/roundController";
 import { getScoringMode } from "./engine/scoring";
@@ -29,6 +31,7 @@ import { getRoomsPersistenceSnapshot, hydrateRoomsPersistenceSnapshot } from "./
 import { stopRateLimitCleanup } from "./routes/register";
 import { assertProductionJoinSecret } from "./security/joinToken";
 import { assertAccountIdentityConfiguration } from "./security/accountIdentity";
+import { initializeQuizRuntime } from "./startup/runtimeInitialization";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -69,42 +72,39 @@ configureStatePersistence({
 
 const app = createApp();
 
-// Auto-sync from GitHub on startup if configured
-async function autoSync() {
-  const config = getGitHubSyncConfig();
-  if (!config) {
+async function main() {
+  const githubConfig = getGitHubSyncConfig();
+  if (githubConfig) {
+    console.log(
+      `[Startup] GitHub repo: ${githubConfig.owner}/${githubConfig.repo} `
+      + `(branch: ${githubConfig.branch}, path: ${githubConfig.contentPath})`
+    );
+    console.log("[Startup] Refreshing the catalog before opening quiz answer windows...");
+  } else {
     console.log(
       "[Startup] GitHub not configured. Set GITHUB_OWNER/GITHUB_REPO (or GITHUB_CONTENT_OWNER/GITHUB_CONTENT_REPO) to enable auto-sync."
     );
-    console.log("[Startup] Engine bank is empty. Use POST /admin/content/import to load questions.");
-    return;
   }
 
-  console.log(
-    `[Startup] GitHub repo: ${config.owner}/${config.repo} (branch: ${config.branch}, path: ${config.contentPath})`
-  );
+  const initialization = await initializeQuizRuntime({
+    holdRuntimeStarts: holdQuizRuntimeStarts,
+    releaseRuntimeStarts: releaseQuizRuntimeStarts,
+    restorePersistedState,
+    hasGitHubSyncConfig: () => githubConfig !== null,
+    syncFromGitHub,
+    startAutomaticQuizRuntime,
+  });
+  const { restored, automaticRooms, syncResult } = initialization;
 
-  console.log("[Startup] Auto-syncing from GitHub...");
-  try {
-    const result = await syncFromGitHub();
-    if (result.success) {
-      console.log(`[Startup] Synced ${result.questionsLoaded} questions from ${result.topicsLoaded} topics`);
-      const synchronizedRooms = startAutomaticQuizRuntime();
-      if (synchronizedRooms.length > 0) {
-        console.log(`[Startup] Applied automatic quiz runtime after content sync: ${synchronizedRooms.join(", ")}`);
-      }
-    } else {
-      console.warn(`[Startup] Sync completed with ${result.errors.length} errors`);
-      result.errors.forEach((e) => console.warn(`  - ${e}`));
-    }
-  } catch (err) {
-    console.error("[Startup] Auto-sync failed:", err);
+  if (syncResult?.success) {
+    console.log(`[Startup] Synced ${syncResult.questionsLoaded} questions from ${syncResult.topicsLoaded} topics`);
+  } else if (syncResult) {
+    console.warn(
+      `[Startup] Catalog sync failed safely; retained restored catalog (${syncResult.errors.length} error(s))`
+    );
+    syncResult.errors.forEach((error) => console.warn(`  - ${error}`));
   }
-}
 
-async function main() {
-  const restored = await restorePersistedState();
-  const automaticRooms = startAutomaticQuizRuntime();
   if (automaticRooms.length > 0) {
     console.log(
       `[Startup] Automatic quiz runtime started for ${automaticRooms.length} room(s) after ${restored ? "persistence restore" : "fresh initialization"}: ${automaticRooms.join(", ")}`
@@ -190,8 +190,6 @@ async function main() {
         : "[Config] Use POST /admin/start to begin the quiz"
     );
 
-    // Auto-sync from GitHub after server starts
-    autoSync();
   });
 }
 

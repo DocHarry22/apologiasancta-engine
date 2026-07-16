@@ -6,7 +6,7 @@
  */
 
 import { QuestionData } from "./questions";
-import { UIQuestion, normalizeToEngine } from "./validate";
+import { UIQuestion, normalizeToEngine, validateQuestion } from "./validate";
 import { schedulePersistence } from "../state/persistence";
 import { DEFAULT_ROOM_ID } from "../state/rooms";
 
@@ -32,8 +32,8 @@ export interface PersistedContentBankSnapshot {
 }
 
 // In-memory storage
-const bank: Map<string, BankEntry> = new Map();
-const topicIndex: Map<string, Set<string>> = new Map();
+let bank: Map<string, BankEntry> = new Map();
+let topicIndex: Map<string, Set<string>> = new Map();
 
 const activePools: Map<string, BankEntry[]> = new Map();
 
@@ -56,6 +56,66 @@ function normalizeDifficultyLevel(
   return 3;
 }
 
+function buildBankEntry(question: UIQuestion): BankEntry {
+  return {
+    id: question.id,
+    topicId: question.topicId,
+    difficulty: normalizeDifficultyLevel(question.difficulty),
+    engineFormat: normalizeToEngine(question),
+    originalQuestion: question,
+  };
+}
+
+/**
+ * Replace the catalog in one synchronous commit.
+ *
+ * The replacement is fully validated and indexed before the live references are
+ * swapped. Existing room pools intentionally retain their current immutable
+ * entries so a content refresh cannot change a question or correct answer in the
+ * middle of an answer window. A room picks up the replacement catalog the next
+ * time its pool/topic is selected.
+ */
+export function replaceCatalogAtomically(questions: UIQuestion[]): {
+  added: number;
+  updated: number;
+  removed: number;
+  ids: string[];
+} {
+  const nextBank = new Map<string, BankEntry>();
+  const nextTopicIndex = new Map<string, Set<string>>();
+
+  for (let index = 0; index < questions.length; index += 1) {
+    const question = questions[index];
+    const validation = validateQuestion(question);
+    if (!validation.valid) {
+      throw new Error(`Invalid question at index ${index}: ${validation.errors.join("; ")}`);
+    }
+    if (nextBank.has(question.id)) {
+      throw new Error(`Duplicate question id in replacement catalog: ${question.id}`);
+    }
+
+    const entry = buildBankEntry(question);
+    nextBank.set(question.id, entry);
+    const topicQuestionIds = nextTopicIndex.get(question.topicId) ?? new Set<string>();
+    topicQuestionIds.add(question.id);
+    nextTopicIndex.set(question.topicId, topicQuestionIds);
+  }
+
+  const previousIds = new Set(bank.keys());
+  const ids = [...nextBank.keys()];
+  const added = ids.filter((id) => !previousIds.has(id)).length;
+  const updated = ids.length - added;
+  const removed = [...previousIds].filter((id) => !nextBank.has(id)).length;
+
+  // Map reference replacement is atomic with respect to the Node event loop;
+  // readers can observe the complete old catalog or the complete new one only.
+  bank = nextBank;
+  topicIndex = nextTopicIndex;
+  schedulePersistence();
+
+  return { added, updated, removed, ids };
+}
+
 /**
  * Ingest a batch of UI questions into the bank
  *
@@ -72,13 +132,7 @@ export function ingestQuestions(questions: UIQuestion[]): {
   const ids: string[] = [];
 
   for (const q of questions) {
-    const entry: BankEntry = {
-      id: q.id,
-      topicId: q.topicId,
-      difficulty: normalizeDifficultyLevel(q.difficulty),
-      engineFormat: normalizeToEngine(q),
-      originalQuestion: q,
-    };
+    const entry = buildBankEntry(q);
 
     const exists = bank.has(q.id);
     bank.set(q.id, entry);
