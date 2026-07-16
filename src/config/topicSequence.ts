@@ -74,7 +74,19 @@ function getStoredConfig(roomId: string = DEFAULT_ROOM_ID): TopicSequenceConfig 
 }
 
 function getSequence(config: TopicSequenceConfig, availableTopicIds: string[]): string[] {
-  return config.topicSequence.length > 0 ? [...config.topicSequence] : [...availableTopicIds].sort();
+  const available = [...new Set(availableTopicIds)].sort();
+  if (config.topicSequence.length === 0) {
+    return available;
+  }
+
+  const availableSet = new Set(available);
+  const configuredAvailable = config.topicSequence.filter(
+    (topicId, index, sequence) => availableSet.has(topicId) && sequence.indexOf(topicId) === index
+  );
+
+  // A catalog refresh can retire every topic in a persisted custom sequence.
+  // Fall back to the refreshed catalog rather than returning a stale topic ID.
+  return configuredAvailable.length > 0 ? configuredAvailable : available;
 }
 
 /**

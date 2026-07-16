@@ -2,17 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Response } from "express";
 import {
+  getActivePoolSize,
   getPoolQuestion,
   getQuestionById,
   getTotalBankSize,
+  getContentBankPersistenceSnapshot,
+  hydrateContentBankPersistenceSnapshot,
   ingestQuestions,
+  replaceCatalogAtomically,
   setActivePoolForRoom,
 } from "./content/bank";
 import { syncCatalogFromSource, type GitHubContentSource, type GitHubSyncResult } from "./content/github";
-import { setTopicSequenceConfig } from "./config/topicSequence";
+import {
+  getTopicSequencePersistenceSnapshot,
+  hydrateTopicSequencePersistenceSnapshot,
+  setTopicSequenceConfig,
+} from "./config/topicSequence";
 import {
   getControllerPersistenceSnapshot,
   getStatus,
+  hydrateControllerPersistenceSnapshot,
+  pause,
   releaseQuizRuntimeStarts,
   start,
   startAutomaticQuizRuntime,
@@ -22,23 +32,45 @@ import {
   skipToNext,
 } from "./engine/roundController";
 import { addClient, resetBrokerForTests } from "./sse/broker";
-import { evaluateAnswers, getPlayerInfo, initializePlayerRoom, registerPlayer, submitAnswerForRegistered } from "./state/players";
+import {
+  evaluateAnswers,
+  getPlayerInfo,
+  getPlayersPersistenceSnapshot,
+  hydratePlayersPersistenceSnapshot,
+  initializePlayerRoom,
+  registerPlayer,
+  submitAnswerForRegistered,
+} from "./state/players";
 import { closeGameplayRoom } from "./state/roomLifecycle";
-import { createRoom, getRoom } from "./state/rooms";
+import {
+  createRoom,
+  getRoom,
+  getRoomsPersistenceSnapshot,
+  hydrateRoomsPersistenceSnapshot,
+} from "./state/rooms";
 import { initializeQuizRuntime } from "./startup/runtimeInitialization";
 import { resetRuntimeState } from "./testSupport/runtimeTestUtils";
 
-function buildQuestion(id: string, topicId: string, text: string) {
+function buildQuestion(
+  id: string,
+  topicId: string,
+  text: string,
+  correctId: "A" | "B" | "C" | "D" = "A"
+) {
   return {
     id,
     topicId,
     question: text,
     choices: { A: "Alpha", B: "Beta", C: "Gamma", D: "Delta" },
-    correctId: "A" as const,
+    correctId,
     teaching: { title: `Teaching ${id}`, body: `Explanation for ${id}`, refs: ["CCC 1"] },
     difficulty: 3 as const,
     tags: ["runtime-safety"],
   };
+}
+
+function jsonRoundTrip<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function controllerSnapshotForRoom(roomId: string) {
@@ -238,6 +270,95 @@ test("GitHub sync rejects invalid content without exposing it and commits valid 
   resetRuntimeState();
 });
 
+test("persistence retains exact active-pool revisions across a catalog replacement", { concurrency: false }, () => {
+  resetRuntimeState();
+
+  try {
+    ingestQuestions([
+      buildQuestion("retired-question", "retired-topic", "Retired live question"),
+      buildQuestion("versioned-question", "retired-topic", "Original live revision"),
+    ]);
+    setActivePoolForRoom(["retired-topic"], false, "global");
+
+    replaceCatalogAtomically([
+      buildQuestion("versioned-question", "refreshed-topic", "Refreshed catalog revision", "B"),
+      buildQuestion("new-question", "refreshed-topic", "New catalog question", "C"),
+    ]);
+
+    const persisted = jsonRoundTrip(getContentBankPersistenceSnapshot());
+    hydrateContentBankPersistenceSnapshot(persisted);
+
+    assert.equal(getTotalBankSize(), 2);
+    assert.equal(getQuestionById("retired-question"), null);
+    assert.equal(getQuestionById("versioned-question")?.engineFormat.text, "Refreshed catalog revision");
+    assert.equal(getQuestionById("versioned-question")?.engineFormat.correctId, "B");
+    assert.equal(getActivePoolSize("global"), 2);
+    assert.deepEqual(
+      [getPoolQuestion(0, "global"), getPoolQuestion(1, "global")].map((question) => ({
+        text: question?.text,
+        correctId: question?.correctId,
+      })),
+      [
+        { text: "Retired live question", correctId: "A" },
+        { text: "Original live revision", correctId: "A" },
+      ],
+      "restart must retain retired questions and the exact same-ID revision selected for the answer window"
+    );
+    assert.equal(getStatus("global").questionSource, "active_pool");
+  } finally {
+    resetRuntimeState();
+  }
+});
+
+function capturePausedSummaryRuntime(roomId: string) {
+  const currentTopicId = `${roomId}-current-topic`;
+  const pendingTopicId = `${roomId}-pending-topic`;
+  ingestQuestions([
+    buildQuestion(`${roomId}-current-question`, currentTopicId, "Persisted current question"),
+    buildQuestion(`${roomId}-pending-question`, pendingTopicId, "Persisted pending question"),
+  ]);
+  const room = createRoom("Persisted Summary Room", roomId);
+  setTopicSequenceConfig({
+    topicSequence: [currentTopicId, pendingTopicId],
+    autoAdvance: false,
+    congratsDisplayTimeMs: 1_000,
+    countdownSeconds: 1,
+  }, room.roomId);
+  assert.equal(startNextTopic(currentTopicId, room.roomId), true);
+
+  const player = registerPlayer("Runtime_Player");
+  assert.equal(player.ok, true);
+  initializePlayerRoom(player.userId!, room.roomId);
+  assert.equal(start(room.roomId), true);
+  assert.equal(submitAnswerForRegistered(0, player.userId!, "a", room.roomId).accepted, true);
+  evaluateAnswers(0, "A", {
+    openStartMs: Date.now() - 1_000,
+    openDurationMs: 25_000,
+    difficulty: 3,
+  }, room.roomId);
+  const score = getPlayerInfo(player.userId!, room.roomId)!.totalPoints;
+
+  skipToNext(room.roomId);
+  assert.equal(getStatus(room.roomId).inTopicSummary, true);
+  assert.equal(controllerSnapshotForRoom(room.roomId)?.pendingNextTopicId, pendingTopicId);
+  pause(room.roomId);
+
+  return {
+    roomId: room.roomId,
+    playerId: player.userId!,
+    score,
+    currentTopicId,
+    pendingTopicId,
+    snapshots: jsonRoundTrip({
+      content: getContentBankPersistenceSnapshot(),
+      topicSequence: getTopicSequencePersistenceSnapshot(),
+      rooms: getRoomsPersistenceSnapshot(),
+      players: getPlayersPersistenceSnapshot(),
+      controller: getControllerPersistenceSnapshot(),
+    }),
+  };
+}
+
 async function runStartupOrderingCase(sync: () => Promise<GitHubSyncResult>) {
   let automaticStartCalls = 0;
   return initializeQuizRuntime({
@@ -291,6 +412,90 @@ test("startup holds OPEN timers until sync settles and starts exactly once after
       scoreBeforeStartup,
       "startup must not reset scores through a second automatic start"
     );
+  } finally {
+    releaseQuizRuntimeStarts();
+    resetRuntimeState();
+    restoreFlags();
+  }
+});
+
+test("startup replaces a stale persisted pending topic with the refreshed catalog", { concurrency: false }, async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_250_000 });
+  const restoreFlags = setRuntimeFlags("true", "true");
+  resetRuntimeState();
+
+  try {
+    const captured = capturePausedSummaryRuntime("stale-summary-room");
+    assert.equal(captured.score > 0, true);
+    resetRuntimeState();
+
+    const refreshedTopicId = "refreshed-safe-topic";
+    const initialization = await initializeQuizRuntime({
+      holdRuntimeStarts: holdQuizRuntimeStarts,
+      releaseRuntimeStarts: releaseQuizRuntimeStarts,
+      restorePersistedState: async () => {
+        hydrateContentBankPersistenceSnapshot(captured.snapshots.content);
+        hydrateTopicSequencePersistenceSnapshot(captured.snapshots.topicSequence);
+        hydrateRoomsPersistenceSnapshot(captured.snapshots.rooms);
+        hydratePlayersPersistenceSnapshot(captured.snapshots.players);
+        hydrateControllerPersistenceSnapshot(captured.snapshots.controller);
+        return true;
+      },
+      hasGitHubSyncConfig: () => true,
+      syncFromGitHub: async () => {
+        replaceCatalogAtomically([
+          buildQuestion("refreshed-safe-question", refreshedTopicId, "Refreshed safe question", "B"),
+        ]);
+        return { success: true, topicsLoaded: 1, questionsLoaded: 1, errors: [] };
+      },
+      startAutomaticQuizRuntime,
+    });
+
+    assert.equal(initialization.restored, true);
+    assert.equal(initialization.automaticRooms.includes(captured.roomId), true);
+    assert.equal(getQuestionById(`${captured.roomId}-pending-question`), null);
+    assert.equal(getStatus(captured.roomId).running, true);
+    assert.equal(getStatus(captured.roomId).inTopicSummary, false);
+    assert.equal(getStatus(captured.roomId).currentTopicId, refreshedTopicId);
+    assert.equal(getStatus(captured.roomId).questionSource, "active_pool");
+    assert.equal(getPoolQuestion(0, captured.roomId)?.text, "Refreshed safe question");
+    assert.equal(
+      getPlayerInfo(captured.playerId, captured.roomId)?.totalPoints,
+      0,
+      "scores reset only after a valid refreshed topic has been selected"
+    );
+  } finally {
+    releaseQuizRuntimeStarts();
+    resetRuntimeState();
+    restoreFlags();
+  }
+});
+
+test("startup preserves a paused final summary when no valid catalog topic remains", { concurrency: false }, (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_275_000 });
+  const restoreFlags = setRuntimeFlags("true", "true");
+  resetRuntimeState();
+
+  try {
+    const captured = capturePausedSummaryRuntime("no-topic-summary-room");
+    resetRuntimeState();
+    hydrateContentBankPersistenceSnapshot(captured.snapshots.content);
+    hydrateTopicSequencePersistenceSnapshot(captured.snapshots.topicSequence);
+    hydrateRoomsPersistenceSnapshot(captured.snapshots.rooms);
+    hydratePlayersPersistenceSnapshot(captured.snapshots.players);
+    hydrateControllerPersistenceSnapshot(captured.snapshots.controller);
+    replaceCatalogAtomically([]);
+
+    assert.equal(startAutomaticQuizRuntimeForRoom(captured.roomId), false);
+    const status = getStatus(captured.roomId);
+    assert.equal(status.running, false);
+    assert.equal(status.inTopicSummary, true);
+    assert.equal(status.summaryTopicId, captured.currentTopicId);
+    assert.equal(status.currentTopicId, captured.currentTopicId);
+    assert.equal(status.questionSource, "active_pool");
+    assert.equal(status.totalQuestions, 1);
+    assert.equal(getPoolQuestion(0, captured.roomId)?.text, "Persisted current question");
+    assert.equal(getPlayerInfo(captured.playerId, captured.roomId)?.totalPoints, captured.score);
   } finally {
     releaseQuizRuntimeStarts();
     resetRuntimeState();

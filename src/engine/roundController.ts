@@ -20,6 +20,7 @@ import {
   getActiveTopicId,
   topicIdToTitle,
   getAllTopicIds,
+  getTopicQuestions,
   setActivePoolForRoom,
 } from "../content/bank";
 import { getScoringMode } from "./scoring";
@@ -574,10 +575,14 @@ function clearTopicTransitionTimer(roomId: string = DEFAULT_ROOM_ID): void {
 /**
  * Start the next topic in sequence
  */
-export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): void {
+export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID): boolean {
   if (!isGameplayRoomSupported(roomId)) {
     console.log(`[Controller] Ignoring topic start for inactive room: ${roomId}`);
-    return;
+    return false;
+  }
+  if (getTopicQuestions(topicId).length === 0) {
+    console.error(`[Controller] No questions found for topic: ${topicId}; preserving current room state`);
+    return false;
   }
   const state = getControllerState(roomId);
   console.log(`[Controller] Starting next topic: ${topicId}`);
@@ -600,7 +605,7 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
   
   if (poolSize === 0) {
     console.error(`[Controller] No questions found for topic: ${topicId}`);
-    return;
+    return false;
   }
   
   // Reset to first question
@@ -621,6 +626,7 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
     // Broadcast current state so UI updates
     broadcastState(roomId);
   }
+  return true;
 }
 
 /**
@@ -764,6 +770,25 @@ export function start(roomId: string = DEFAULT_ROOM_ID): boolean {
   return true;
 }
 
+function resolveAutomaticNextTopic(state: ControllerState, roomId: string): string | null {
+  const availableTopics = getAllTopicIds();
+  const availableSet = new Set(availableTopics);
+  if (state.pendingNextTopicId && availableSet.has(state.pendingNextTopicId)) {
+    return state.pendingNextTopicId;
+  }
+
+  const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
+  const determinedTopicId = currentTopicId
+    ? determineNextTopic(currentTopicId, roomId)
+    : null;
+  if (determinedTopicId && availableSet.has(determinedTopicId)) {
+    return determinedTopicId;
+  }
+
+  const firstTopicId = getFirstTopicId(availableTopics, roomId);
+  return firstTopicId && availableSet.has(firstTopicId) ? firstTopicId : null;
+}
+
 /**
  * Apply the deployment runtime policy to one active room. Continuous mode
  * implies auto-start and resumes a persisted topic transition at the next
@@ -782,24 +807,34 @@ export function startAutomaticQuizRuntimeForRoom(
   }
 
   const state = getControllerState(roomId);
+  if (state.inTopicSummary && !isQuizContinuousEnabled()) {
+    console.log(`[Controller] Preserving completed summary for room ${roomId} until an admin selects the next topic`);
+    return false;
+  }
+  if (state.inTopicSummary) {
+    const nextTopicId = resolveAutomaticNextTopic(state, roomId);
+    if (!nextTopicId) {
+      console.warn(
+        `[Controller] No valid topic remains for room ${roomId}; preserving paused final summary`
+      );
+      return false;
+    }
+    if (!startNextTopic(nextTopicId, roomId)) {
+      return false;
+    }
+  }
+
   if (isQuizContinuousEnabled() && !getActiveTopicId(roomId)) {
     const firstTopicId = getFirstTopicId(getAllTopicIds(), roomId);
     if (firstTopicId) {
-      startNextTopic(firstTopicId, roomId);
+      if (!startNextTopic(firstTopicId, roomId)) {
+        return false;
+      }
     }
   }
 
   if (state.running) {
     return true;
-  }
-
-  if (isQuizContinuousEnabled() && state.inTopicSummary) {
-    const currentTopicId = state.summaryTopicId || getActiveTopicId(roomId);
-    const nextTopicId = state.pendingNextTopicId
-      || (currentTopicId ? determineNextTopic(currentTopicId, roomId) : null);
-    if (nextTopicId) {
-      startNextTopic(nextTopicId, roomId);
-    }
   }
 
   return start(roomId);

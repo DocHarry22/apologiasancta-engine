@@ -27,7 +27,12 @@ export interface TopicSummary {
 
 export interface PersistedContentBankSnapshot {
   entries: BankEntry[];
-  activePools?: Array<{ roomId: string; questionIds: string[] }>;
+  activePools?: Array<{
+    roomId: string;
+    questionIds: string[];
+    /** Exact selected revisions, including entries retired from the catalog. */
+    entries?: BankEntry[];
+  }>;
   activePoolQuestionIds?: string[];
 }
 
@@ -391,6 +396,7 @@ export function getContentBankPersistenceSnapshot(): PersistedContentBankSnapsho
     activePools: [...activePools.entries()].map(([roomId, pool]) => ({
       roomId,
       questionIds: pool.map((entry) => entry.id),
+      entries: pool.map((entry) => structuredClone(entry)),
     })),
     activePoolQuestionIds: getStoredPool(DEFAULT_ROOM_ID).map((entry) => entry.id),
   };
@@ -418,11 +424,14 @@ export function hydrateContentBankPersistenceSnapshot(
   const persistedPools = snapshot.activePools;
   if (persistedPools && persistedPools.length > 0) {
     for (const persistedPool of persistedPools) {
+      const embeddedEntries = persistedPool.entries;
       activePools.set(
         persistedPool.roomId,
-        (persistedPool.questionIds || [])
-          .map((id) => bank.get(id))
-          .filter((entry): entry is BankEntry => Boolean(entry))
+        Array.isArray(embeddedEntries)
+          ? embeddedEntries.map((entry) => structuredClone(entry))
+          : (persistedPool.questionIds || [])
+              .map((id) => bank.get(id))
+              .filter((entry): entry is BankEntry => Boolean(entry))
       );
     }
     return;
