@@ -146,6 +146,16 @@ test("account assertions are strict, tamper-evident, short-lived, and backed by 
     verifyAccountIdentityAssertion(tamperSignature(assertion), issuedAtMs + 1_000, env),
     { ok: false, reason: "invalid_signature" }
   );
+  const [encodedPayload, signature] = assertion.split(".");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const lastIndex = alphabet.indexOf(signature.at(-1)!);
+  assert.equal(lastIndex % 4, 0);
+  const nonCanonicalSignature = `${signature.slice(0, -1)}${alphabet[lastIndex + 1]}`;
+  assert.deepEqual(Buffer.from(nonCanonicalSignature, "base64url"), Buffer.from(signature, "base64url"));
+  assert.deepEqual(
+    verifyAccountIdentityAssertion(`${encodedPayload}.${nonCanonicalSignature}`, issuedAtMs + 1_000, env),
+    { ok: false, reason: "invalid_signature" }
+  );
   assert.deepEqual(
     verifyAccountIdentityAssertion(`${assertion}!`, issuedAtMs + 1_000, env),
     { ok: false, reason: "malformed" }
