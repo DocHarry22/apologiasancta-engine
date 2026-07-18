@@ -10,7 +10,7 @@ The production blueprint now uses PostgreSQL atomic runtime snapshots and no lon
 
 An opt-in account identity exchange now lets the authenticated Next.js server map its opaque account subject to a durable Engine-owned player ID. The shared HMAC secret stays backend-only, assertions expire quickly and are room-bound, exact retries are idempotent, and nonce reuse with different signed content is rejected. Guest registration and existing room join tokens remain supported, but an account-linked display name can only change through a fresh backend assertion. See [`docs/ACCOUNT_IDENTITY_ROLLOUT.md`](docs/ACCOUNT_IDENTITY_ROLLOUT.md) before enabling it.
 
-`ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Configure the latter on Render before deploying this branch. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
+`ADMIN_TOKEN` and the independent `PLAYER_JOIN_SECRET` are required in production. Admin routes now fail closed when `ADMIN_TOKEN` is absent; production rejects short and documented-placeholder values. When `CONTENT_API_REQUIRED=true`, the server-only `CONTENT_API_URL` and `CONTENT_API_TOKEN` are also mandatory. Configure all secrets on Render before deployment. The coordinated UI repository contains the full [production runbook](https://github.com/DocHarry22/apologiasancta-ui/blob/feature/apologia-operational-platform/docs/PRODUCTION_RUNBOOK.md).
 
 ## Current State (v1 — May 2026)
 
@@ -103,7 +103,15 @@ CORS_ORIGINS=http://localhost:3000,https://your-domain.com
 ALLOW_LOCAL_ORIGINS=false
 
 # Admin
-ADMIN_TOKEN=your-secure-admin-token
+ADMIN_TOKEN=
+
+# Canonical published/live-eligible feed (server-only)
+CONTENT_API_REQUIRED=false
+CONTENT_API_URL=https://your-ui.example/api/v1/engine/questions
+CONTENT_API_TOKEN=
+CONTENT_API_TIMEOUT_MS=10000
+CONTENT_API_MAX_BYTES=5242880
+CONTENT_API_REFRESH_INTERVAL_MS=300000
 
 # Public player room sessions. Leave blank locally; production must inject a
 # value containing at least 32 random bytes from the provider secret manager.
@@ -220,6 +228,8 @@ All admin endpoints require the `x-admin-token` header.
 - `POST /admin/reset`
 - `GET /admin/status`
 - `POST /admin/persistence/save`
+- `POST /admin/content/refresh` (canonical feed; preserves active pools unless `refreshActivePool: true` is explicitly sent)
+- `GET /admin/content/canonical/status`
 - `GET /admin/rooms`
 - `POST /admin/rooms`
 
@@ -258,8 +268,13 @@ Runtime snapshots include:
 - controller checkpoints
 - room registry and memberships
 - players, room scores, room streaks, and score event history
+- the canonical feed ETag/version/revision checkpoint (never its URL or bearer token)
 
-On restart, the engine restores the current checkpoint. If GitHub content sync is configured, it stages and validates the complete replacement catalog before an atomic commit; controllers remain held until that sync succeeds or fails safely, and a failure retains the restored catalog. `GITHUB_SYNC_TIMEOUT_MS` bounds that startup refresh (60 seconds by default). In production, auto-start and continuous mode default to enabled even if an existing Render service has not synchronized the new blueprint variables; keep `QUIZ_AUTO_START=true` and `QUIZ_CONTINUOUS=true` explicit in provider configuration for auditable diagnostics. Every active room receives a fresh `OPEN` deadline, topic transitions remain automatic, the final topic wraps to the first, the legacy fallback bank wraps to question one, and newly created rooms start immediately. Closing a room disposes all of its phase and topic-transition timers while preserving final result state. Set both flags explicitly to `false` for an emergency manual-control deployment. Development keeps the legacy manual-start behavior unless the flags are enabled.
+On restart, the engine restores the current checkpoint. The canonical content client then requests the protected published/live-eligible feed with a bearer token and conditional ETag headers. A `304`, timeout, invalid payload, version regression, or upstream error leaves the last fully validated catalog and already-selected room pools intact. Successful replacements are atomic; active rooms keep their exact selected question revisions until a later pool/topic selection. Controllers remain held until the startup refresh succeeds or fails safely. If canonical content is required and neither a fresh response nor a validated persisted cache exists, startup fails instead of opening the fixture fallback bank. The legacy GitHub sync remains available when the canonical API is not configured. `CONTENT_API_TIMEOUT_MS` bounds canonical requests and `GITHUB_SYNC_TIMEOUT_MS` bounds legacy GitHub refreshes.
+
+The expected API response is `{ version, updatedAt, questions }`. Each question has `id`, integer `version`, `topicId`, `difficulty`, `prompt`, exactly four `options`, `correctOptionId`, and optional reveal-only explanation/source fields. The endpoint itself must filter to published, active, live-eligible rows. The client also accepts the equivalent snake_case protected PostgREST view shape and defensively excludes rows explicitly marked draft, retired, disabled, or not live-eligible. Correct answers and explanations remain server-side until the existing `REVEAL` phase; public `/state`, SSE, and `/topics/:topicId` payloads remain sanitised.
+
+When `CONTENT_API_REQUIRED=true`, the canonical feed is the sole catalog authority. Legacy import, GitHub sync/delete, local clear, and `/admin/quiz/set` mutations return `409`; old unmarked pools are discarded during canonical adoption. If the canonical checkpoint or selected pool is unavailable, live state/SSE and health return `503` and answers are refused. The bundled fixture bank is never used in required mode. Legacy endpoints and bundled fallback remain available only when canonical content is not required.
 
 ### Persistence Drivers
 

@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { answerRateLimit, processAnswer } from "./answer";
 import { handleRegister, registrationRateLimit } from "./register";
-import { getAnswerWindowStatus } from "../engine/roundController";
+import { getAnswerWindowStatus, isQuestionContentAvailable } from "../engine/roundController";
 import { isExpiredJoinTokenPayload, requirePlayerAuthorization } from "../security/playerAuthorization";
 import { signJoinToken } from "../security/joinToken";
 import { addClient, removeClient } from "../sse/broker";
@@ -89,12 +89,26 @@ router.post("/:roomId/leave", (req: Request<{ roomId: string }>, res) => {
 
 router.get("/:roomId/state", (req, res) => {
   const room = requireOpenRoom(req.params.roomId, res);
+  if (room && !isQuestionContentAvailable(room.roomId)) {
+    return res.status(503).json({
+      ok: false,
+      reason: "canonical_content_unavailable",
+      error: "Canonical quiz content is temporarily unavailable",
+    });
+  }
   return room ? res.json(getStateForRoom(room.roomId)) : undefined;
 });
 
 router.get("/:roomId/events", (req, res) => {
   const room = requireOpenRoom(req.params.roomId, res);
   if (!room) return;
+  if (!isQuestionContentAvailable(room.roomId)) {
+    return res.status(503).json({
+      ok: false,
+      reason: "canonical_content_unavailable",
+      error: "Canonical quiz content is temporarily unavailable",
+    });
+  }
   const userId = typeof req.query.userId === "string" ? req.query.userId : undefined;
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");

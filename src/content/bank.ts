@@ -17,6 +17,14 @@ export interface BankEntry {
   difficulty: 1 | 2 | 3 | 4 | 5;
   engineFormat: QuestionData;
   originalQuestion: UIQuestion;
+  /** Missing on legacy snapshots; only the canonical client may set canonical. */
+  catalogSource?: "legacy" | "canonical";
+}
+
+export interface CatalogReplacementOptions {
+  catalogSource?: "legacy" | "canonical";
+  /** Drop any selected pool that was not created from canonical feed entries. */
+  discardNonCanonicalPools?: boolean;
 }
 
 /** Topic index entry */
@@ -34,11 +42,40 @@ export interface PersistedContentBankSnapshot {
     entries?: BankEntry[];
   }>;
   activePoolQuestionIds?: string[];
+  /**
+   * Non-secret checkpoint for the canonical content feed. Keeping this beside
+   * the catalog makes ETag/version checks restart-safe without persisting the
+   * feed URL or bearer credential.
+   */
+  canonicalContent?: PersistedCanonicalContentCache | null;
+}
+
+export interface CanonicalQuestionRevision {
+  id: string;
+  version: number;
+  updatedAt?: string;
+  digest: string;
+}
+
+export interface PersistedCanonicalContentCache {
+  schemaVersion: 1;
+  etag?: string;
+  lastModified?: string;
+  feedVersion?: string;
+  feedUpdatedAt?: string;
+  fingerprint?: string;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  lastChangedAt?: string;
+  lastError?: string;
+  questionCount: number;
+  revisions: CanonicalQuestionRevision[];
 }
 
 // In-memory storage
 let bank: Map<string, BankEntry> = new Map();
 let topicIndex: Map<string, Set<string>> = new Map();
+let canonicalContentCache: PersistedCanonicalContentCache | null = null;
 
 const activePools: Map<string, BankEntry[]> = new Map();
 
@@ -61,13 +98,17 @@ function normalizeDifficultyLevel(
   return 3;
 }
 
-function buildBankEntry(question: UIQuestion): BankEntry {
+function buildBankEntry(
+  question: UIQuestion,
+  catalogSource: "legacy" | "canonical" = "legacy"
+): BankEntry {
   return {
     id: question.id,
     topicId: question.topicId,
     difficulty: normalizeDifficultyLevel(question.difficulty),
     engineFormat: normalizeToEngine(question),
     originalQuestion: question,
+    catalogSource,
   };
 }
 
@@ -80,7 +121,10 @@ function buildBankEntry(question: UIQuestion): BankEntry {
  * middle of an answer window. A room picks up the replacement catalog the next
  * time its pool/topic is selected.
  */
-export function replaceCatalogAtomically(questions: UIQuestion[]): {
+export function replaceCatalogAtomically(
+  questions: UIQuestion[],
+  options: CatalogReplacementOptions = {}
+): {
   added: number;
   updated: number;
   removed: number;
@@ -99,7 +143,7 @@ export function replaceCatalogAtomically(questions: UIQuestion[]): {
       throw new Error(`Duplicate question id in replacement catalog: ${question.id}`);
     }
 
-    const entry = buildBankEntry(question);
+    const entry = buildBankEntry(question, options.catalogSource ?? "legacy");
     nextBank.set(question.id, entry);
     const topicQuestionIds = nextTopicIndex.get(question.topicId) ?? new Set<string>();
     topicQuestionIds.add(question.id);
@@ -116,6 +160,13 @@ export function replaceCatalogAtomically(questions: UIQuestion[]): {
   // readers can observe the complete old catalog or the complete new one only.
   bank = nextBank;
   topicIndex = nextTopicIndex;
+  if (options.discardNonCanonicalPools) {
+    for (const [roomId, pool] of activePools.entries()) {
+      if (pool.some((entry) => entry.catalogSource !== "canonical")) {
+        activePools.delete(roomId);
+      }
+    }
+  }
   schedulePersistence();
 
   return { added, updated, removed, ids };
@@ -338,6 +389,7 @@ export function clearBank(): void {
   bank.clear();
   topicIndex.clear();
   activePools.clear();
+  canonicalContentCache = null;
   schedulePersistence();
 }
 
@@ -399,7 +451,40 @@ export function getContentBankPersistenceSnapshot(): PersistedContentBankSnapsho
       entries: pool.map((entry) => structuredClone(entry)),
     })),
     activePoolQuestionIds: getStoredPool(DEFAULT_ROOM_ID).map((entry) => entry.id),
+    canonicalContent: canonicalContentCache ? structuredClone(canonicalContentCache) : null,
   };
+}
+
+export function getCanonicalContentCache(): PersistedCanonicalContentCache | null {
+  return canonicalContentCache ? structuredClone(canonicalContentCache) : null;
+}
+
+/**
+ * Required-mode trust check. Older snapshots and every legacy import lack
+ * canonical provenance, so they cannot be mistaken for the authoritative feed.
+ */
+export function hasCanonicalCatalogProvenance(): boolean {
+  if (!canonicalContentCache || bank.size === 0 || bank.size !== canonicalContentCache.questionCount) {
+    return false;
+  }
+  const currentRevisionIds = new Set(canonicalContentCache.revisions.map((revision) => revision.id));
+  for (const entry of bank.values()) {
+    if (entry.catalogSource !== "canonical" || !currentRevisionIds.has(entry.id)) return false;
+  }
+  for (const pool of activePools.values()) {
+    if (pool.some((entry) => entry.catalogSource !== "canonical")) return false;
+  }
+  return true;
+}
+
+export function setCanonicalContentCache(cache: PersistedCanonicalContentCache): void {
+  canonicalContentCache = structuredClone(cache);
+  schedulePersistence();
+}
+
+export function clearCanonicalContentCache(): void {
+  canonicalContentCache = null;
+  schedulePersistence();
 }
 
 export function hydrateContentBankPersistenceSnapshot(
@@ -408,10 +493,15 @@ export function hydrateContentBankPersistenceSnapshot(
   bank.clear();
   topicIndex.clear();
   activePools.clear();
+  canonicalContentCache = null;
 
   if (!snapshot) {
     return;
   }
+
+  canonicalContentCache = snapshot.canonicalContent
+    ? structuredClone(snapshot.canonicalContent)
+    : null;
 
   for (const entry of snapshot.entries || []) {
     bank.set(entry.id, entry);

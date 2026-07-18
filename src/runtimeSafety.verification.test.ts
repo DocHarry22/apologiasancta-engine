@@ -16,10 +16,12 @@ import { syncCatalogFromSource, type GitHubContentSource, type GitHubSyncResult 
 import {
   getTopicSequencePersistenceSnapshot,
   hydrateTopicSequencePersistenceSnapshot,
+  setTopicLoopMode,
   setTopicSequenceConfig,
 } from "./config/topicSequence";
 import {
   getControllerPersistenceSnapshot,
+  getPendingNextTopic,
   getStatus,
   hydrateControllerPersistenceSnapshot,
   pause,
@@ -305,6 +307,28 @@ test("persistence retains exact active-pool revisions across a catalog replaceme
       "restart must retain retired questions and the exact same-ID revision selected for the answer window"
     );
     assert.equal(getStatus("global").questionSource, "active_pool");
+  } finally {
+    resetRuntimeState();
+  }
+});
+
+test("a refreshed catalog advances away from a retired infinitely-looped topic", { concurrency: false }, (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_150_000 });
+  resetRuntimeState();
+  try {
+    ingestQuestions([buildQuestion("retiring-question", "retiring-topic", "Retiring question")]);
+    setActivePoolForRoom(["retiring-topic"], false, "global");
+    setTopicLoopMode("infinite", "global");
+    assert.equal(start("global"), true);
+
+    replaceCatalogAtomically([
+      buildQuestion("replacement-question", "replacement-topic", "Replacement question"),
+    ]);
+    skipToNext("global");
+
+    assert.equal(getStatus("global").inTopicSummary, true);
+    assert.equal(getPendingNextTopic("global"), "replacement-topic");
+    assert.equal(getPoolQuestion(0, "global")?.text, "Retiring question");
   } finally {
     resetRuntimeState();
   }

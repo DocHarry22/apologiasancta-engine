@@ -5,6 +5,7 @@
 import { Router, Request, Response } from "express";
 import { getStateForRoom } from "../state/store";
 import { DEFAULT_ROOM_ID, isGameplayRoomSupported, requireRoom } from "../state/rooms";
+import { isQuestionContentAvailable } from "../engine/roundController";
 
 const router = Router();
 
@@ -29,6 +30,14 @@ function handleState(_req: Request, res: Response, roomId: string): void {
   }
 
   if (!isRoomOpen(roomId, res)) {
+    return;
+  }
+  if (!isQuestionContentAvailable(roomId)) {
+    res.status(503).json({
+      ok: false,
+      reason: "canonical_content_unavailable",
+      error: "Canonical quiz content is temporarily unavailable",
+    });
     return;
   }
 
