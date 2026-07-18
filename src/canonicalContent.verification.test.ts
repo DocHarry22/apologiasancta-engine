@@ -219,7 +219,18 @@ test("canonical request timeout retains the validated stale cache", { concurrenc
         return new Response(JSON.stringify(feed()), { status: 200 });
       }
       return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        const signal = init?.signal;
+        assert.ok(signal);
+        const onAbort = () => {
+          clearTimeout(failsafe);
+          signal.removeEventListener("abort", onAbort);
+          reject(signal.reason);
+        };
+        const failsafe = setTimeout(() => {
+          signal.removeEventListener("abort", onAbort);
+          reject(new Error("Canonical abort signal did not fire before the test failsafe."));
+        }, 2_000);
+        signal.addEventListener("abort", onAbort, { once: true });
       });
     });
     assert.equal((await refreshCanonicalContent()).success, true);
