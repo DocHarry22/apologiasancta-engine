@@ -128,7 +128,14 @@ export function assertCanonicalGovernanceRecord(record: UnknownRecord): void {
     value(option, "isCorrect", "is_correct") === true
   ));
   const correctId = declaredCorrectId || (flaggedCorrect.length === 1 ? optionId(flaggedCorrect[0]!) : "");
-  if (!correctId || !optionIds.includes(correctId) || flaggedCorrect.length > 1) fail("question.one_best_answer_required");
+  if (
+    !correctId
+    || !optionIds.includes(correctId)
+    || flaggedCorrect.length > 1
+    || (declaredCorrectId && flaggedCorrect.length === 1 && optionId(flaggedCorrect[0]!) !== declaredCorrectId)
+  ) {
+    fail("question.one_best_answer_required");
+  }
 
   const optionExplanations = asRecord(value(record, "optionExplanations", "option_explanations")) ?? {};
   const optionMisconceptions = asRecord(
