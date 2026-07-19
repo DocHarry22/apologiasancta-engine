@@ -115,6 +115,10 @@ export async function restoreConfiguredPersistence(): Promise<boolean> {
 }
 
 export async function startTestServer() {
+  const previousAdminToken = process.env.ADMIN_TOKEN;
+  if (!previousAdminToken) {
+    process.env.ADMIN_TOKEN = "dev-admin-token";
+  }
   const app = createApp();
   const server = await new Promise<import("http").Server>((resolve) => {
     const started = app.listen(0, "127.0.0.1", () => resolve(started));
@@ -136,6 +140,8 @@ export async function startTestServer() {
           resolve();
         });
       });
+      if (previousAdminToken === undefined) delete process.env.ADMIN_TOKEN;
+      else process.env.ADMIN_TOKEN = previousAdminToken;
     },
   };
 }

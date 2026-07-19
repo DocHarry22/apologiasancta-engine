@@ -13,6 +13,10 @@ test("Render installs build tooling and uses managed PostgreSQL", async () => {
   assert.match(blueprint, /key:\s*DATABASE_URL[\s\S]*?fromDatabase:/);
   assert.match(blueprint, /key:\s*STATE_PERSISTENCE_DRIVER\s*\n\s*value:\s*postgres/);
   assert.match(blueprint, /key:\s*PLAYER_JOIN_SECRET\s*\n\s*sync:\s*false/);
+  assert.match(blueprint, /key:\s*CONTENT_API_REQUIRED\s*\n\s*value:\s*"true"/);
+  assert.match(blueprint, /key:\s*CONTENT_API_URL\s*\n\s*sync:\s*false/);
+  assert.match(blueprint, /key:\s*CONTENT_API_TOKEN\s*\n\s*sync:\s*false/);
+  assert.match(blueprint, /key:\s*CONTENT_API_REFRESH_INTERVAL_MS\s*\n\s*value:\s*"300000"/);
   assert.match(blueprint, /key:\s*RATE_LIMIT_REGISTER_MAX\s*\n\s*value:\s*"120"/);
   assert.match(blueprint, /key:\s*RATE_LIMIT_REGISTER_WINDOW_MS\s*\n\s*value:\s*"600000"/);
   assert.match(blueprint, /key:\s*QUIZ_AUTO_START\s*\n\s*value:\s*"true"/);
@@ -36,7 +40,7 @@ test("continuous mode implies automatic startup while explicit flags remain stri
   }), false);
 });
 
-test("environment examples never provide a copyable player-secret placeholder", async () => {
+test("environment examples never provide copyable production-secret placeholders", async () => {
   const examples = await Promise.all([
     readFile(resolve(repositoryRoot, ".env.example"), "utf8"),
     readFile(resolve(repositoryRoot, "env.production.example"), "utf8"),
@@ -44,6 +48,8 @@ test("environment examples never provide a copyable player-secret placeholder", 
 
   for (const example of examples) {
     assert.match(example, /^PLAYER_JOIN_SECRET=\s*$/m);
+    assert.match(example, /^ADMIN_TOKEN=\s*$/m);
+    assert.match(example, /^CONTENT_API_TOKEN=\s*$/m);
     assert.doesNotMatch(example, /^PLAYER_JOIN_SECRET=(?:replace-with-|your-|change-?me|placeholder)/im);
   }
 });

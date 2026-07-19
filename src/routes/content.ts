@@ -36,8 +36,23 @@ import {
 } from "../github/paths";
 import { inferPrefix, nextId } from "../content/id";
 import { syncFromGitHub, getSyncStatus } from "../content/github";
+import {
+  getCanonicalContentStatus,
+  isCanonicalContentRequired,
+  refreshCanonicalContent,
+} from "../content/canonical";
 
 const router = Router();
+
+function rejectLegacyCatalogMutation(res: Response): boolean {
+  if (!isCanonicalContentRequired()) return false;
+  res.status(409).json({
+    error: "Canonical content is authoritative; this legacy catalog mutation is disabled",
+    code: "canonical_content_required",
+    recovery: "Use POST /admin/content/refresh to recover or update the canonical catalog",
+  });
+  return true;
+}
 
 /**
  * POST /admin/content/import
@@ -60,6 +75,7 @@ router.post(
   "/content/import",
   requireAdmin,
   async (req: Request, res: Response) => {
+    if (rejectLegacyCatalogMutation(res)) return;
     try {
       const {
         questions = [],
@@ -165,6 +181,7 @@ router.post(
  *   topicIds: string[] - Selected topics
  */
 router.post("/quiz/set", requireAdmin, async (req: Request, res: Response) => {
+  if (rejectLegacyCatalogMutation(res)) return;
   try {
     const { topicIds = [], shuffle = true } = req.body;
 
@@ -228,7 +245,50 @@ router.get("/content/status", requireAdmin, (req: Request, res: Response) => {
     topicCount: topics.length,
     topics,
     gitHubConfigured: isGitHubConfigured(),
+    canonicalContent: getCanonicalContentStatus(),
   });
+});
+
+/**
+ * POST /admin/content/refresh
+ *
+ * Refresh the canonical published/live-eligible feed. Catalog replacement is
+ * atomic and existing room pools stay immutable by default so an answer key
+ * cannot change during an OPEN round. An administrator may explicitly rebuild
+ * the global pool after coordinating a safe pause.
+ */
+router.post("/content/refresh", requireAdmin, async (req: Request, res: Response) => {
+  const refreshActivePool = req.body?.refreshActivePool === true;
+  const result = await refreshCanonicalContent();
+  if (!result.success) {
+    return res.status(502).json({
+      error: "Canonical content refresh failed; the last validated catalog was retained",
+      ...result,
+      canonicalContent: getCanonicalContentStatus(),
+    });
+  }
+
+  let activePoolSize = getActivePoolSize();
+  if (refreshActivePool) {
+    activePoolSize = setActivePool([], true);
+    clearAllAnswers();
+    onPoolUpdated();
+  }
+
+  return res.json({
+    message: result.notModified
+      ? "Canonical content is already current"
+      : "Canonical published live content refreshed",
+    ...result,
+    activePoolSize,
+    activePoolRefreshed: refreshActivePool,
+    activePoolsPreserved: !refreshActivePool,
+    canonicalContent: getCanonicalContentStatus(),
+  });
+});
+
+router.get("/content/canonical/status", requireAdmin, (_req: Request, res: Response) => {
+  return res.json(getCanonicalContentStatus());
 });
 
 /**
@@ -237,6 +297,7 @@ router.get("/content/status", requireAdmin, (req: Request, res: Response) => {
  * Clear all questions from the content bank.
  */
 router.post("/content/clear", requireAdmin, (req: Request, res: Response) => {
+  if (rejectLegacyCatalogMutation(res)) return;
   clearBank();
   return res.json({
     success: true,
@@ -253,6 +314,7 @@ router.post("/content/clear", requireAdmin, (req: Request, res: Response) => {
  * This does NOT run automatically when clearing local engine bank.
  */
 router.post("/content/github/clear", requireAdmin, async (_req: Request, res: Response) => {
+  if (rejectLegacyCatalogMutation(res)) return;
   const config = getGitHubConfig();
   if (!config) {
     return res.status(400).json({
@@ -281,6 +343,7 @@ router.post("/content/github/clear", requireAdmin, async (_req: Request, res: Re
  * This fetches all topics and questions from the configured GitHub repo.
  */
 router.post("/content/sync", requireAdmin, async (req: Request, res: Response) => {
+  if (rejectLegacyCatalogMutation(res)) return;
   console.log("[sync] Admin triggered GitHub sync");
 
   try {

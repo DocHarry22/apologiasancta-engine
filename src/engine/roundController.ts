@@ -51,6 +51,10 @@ import {
 } from "../config/topicSequence";
 import { schedulePersistence } from "../state/persistence";
 import { isQuizAutoStartEnabled, isQuizContinuousEnabled } from "../config/quizRuntime";
+import {
+  getCanonicalContentStatus,
+  isCanonicalContentRequired,
+} from "../content/canonical";
 
 /** Phase durations from environment (in seconds) */
 const OPEN_SECONDS = parseInt(process.env.OPEN_SECONDS || "25", 10);
@@ -62,8 +66,17 @@ const REVEAL_SECONDS = parseInt(process.env.REVEAL_SECONDS || "8", 10);
  */
 function getQuestion(index: number, roomId: string = DEFAULT_ROOM_ID) {
   const poolQuestion = getPoolQuestion(index, roomId);
-  if (poolQuestion) {
+  if (poolQuestion && isQuestionContentAvailable(roomId)) {
     return poolQuestion;
+  }
+  if (isCanonicalContentRequired()) {
+    const error = new Error("Canonical quiz content is temporarily unavailable") as Error & {
+      statusCode: number;
+      code: string;
+    };
+    error.statusCode = 503;
+    error.code = "canonical_content_unavailable";
+    throw error;
   }
   return getLegacyQuestion(index);
 }
@@ -73,10 +86,22 @@ function getQuestion(index: number, roomId: string = DEFAULT_ROOM_ID) {
  */
 function getTotalQuestions(roomId: string = DEFAULT_ROOM_ID): number {
   const poolSize = getActivePoolSize(roomId);
-  if (poolSize > 0) {
+  if (poolSize > 0 && isQuestionContentAvailable(roomId)) {
     return poolSize;
   }
+  if (isCanonicalContentRequired()) return 0;
   return getLegacyTotal();
+}
+
+/** Bundled fixtures are permitted only in legacy mode. */
+export function isQuestionContentAvailable(roomId: string = DEFAULT_ROOM_ID): boolean {
+  if (!isCanonicalContentRequired()) return true;
+  const poolSize = getActivePoolSize(roomId);
+  const questionIndex = getControllerState(roomId).questionIndex;
+  return getCanonicalContentStatus().ready
+    && poolSize > 0
+    && questionIndex >= 0
+    && questionIndex < poolSize;
 }
 
 /** Controller state */
@@ -234,6 +259,7 @@ function generateTickerItems(roomId: string = DEFAULT_ROOM_ID): string[] {
  * Broadcast current state to all clients in the given room
  */
 function broadcastState(roomId: string = DEFAULT_ROOM_ID): void {
+  if (!isQuestionContentAvailable(roomId)) return;
   broadcast(roomId);
 }
 
@@ -286,7 +312,7 @@ function scheduleNextPhase(roomId: string, delayMs: number, callback: () => void
  */
 function enterOpenPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
-  if (!state.running || !isGameplayRoomSupported(roomId)) {
+  if (!state.running || !isGameplayRoomSupported(roomId) || stopForUnavailableContent(roomId)) {
     return;
   }
   state.phase = "OPEN";
@@ -307,7 +333,7 @@ function enterOpenPhase(roomId: string = DEFAULT_ROOM_ID): void {
  */
 function enterLockedPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
-  if (!state.running || !isGameplayRoomSupported(roomId)) {
+  if (!state.running || !isGameplayRoomSupported(roomId) || stopForUnavailableContent(roomId)) {
     return;
   }
   state.phase = "LOCKED";
@@ -325,7 +351,7 @@ function enterLockedPhase(roomId: string = DEFAULT_ROOM_ID): void {
  */
 function enterRevealPhase(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
-  if (!state.running || !isGameplayRoomSupported(roomId)) {
+  if (!state.running || !isGameplayRoomSupported(roomId) || stopForUnavailableContent(roomId)) {
     return;
   }
   // Evaluate answers before revealing
@@ -399,8 +425,11 @@ function determineNextTopic(currentTopicId: string, roomId: string = DEFAULT_ROO
   
   // Check if we should repeat the current topic
   if (shouldRepeatTopic(roomId)) {
-    console.log(`[Controller] Topic loop mode active - repeating ${currentTopicId}`);
-    return currentTopicId;
+    if (availableTopics.includes(currentTopicId)) {
+      console.log(`[Controller] Topic loop mode active - repeating ${currentTopicId}`);
+      return currentTopicId;
+    }
+    console.log(`[Controller] Retired topic ${currentTopicId} will not be repeated after catalog refresh`);
   }
   
   // Check for next topic in sequence
@@ -432,6 +461,19 @@ function clearAllTransitionTimers(roomId: string = DEFAULT_ROOM_ID): void {
     clearTimeout(state.topicTransitionTimer);
     state.topicTransitionTimer = null;
   }
+}
+
+function stopForUnavailableContent(roomId: string): boolean {
+  if (isQuestionContentAvailable(roomId)) return false;
+  const state = getControllerState(roomId);
+  clearTimer(roomId);
+  clearAllTransitionTimers(roomId);
+  state.running = false;
+  state.endsAtMs = 0;
+  state.openStartMs = 0;
+  markControllerChanged();
+  console.error(`[Controller] Paused room ${roomId}: canonical content is unavailable`);
+  return true;
 }
 
 /**
@@ -635,7 +677,7 @@ export function startNextTopic(topicId: string, roomId: string = DEFAULT_ROOM_ID
  */
 function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
   const state = getControllerState(roomId);
-  if (!state.running || !isGameplayRoomSupported(roomId)) {
+  if (!state.running || !isGameplayRoomSupported(roomId) || stopForUnavailableContent(roomId)) {
     return;
   }
   // Clear answers for the completed question
@@ -666,7 +708,7 @@ function advanceToNextQuestion(roomId: string = DEFAULT_ROOM_ID): void {
 
 // ============== Public API ==============
 
-export type AnswerWindowReason = "game_paused" | "not_started" | "locked" | "too_late";
+export type AnswerWindowReason = "game_paused" | "not_started" | "locked" | "too_late" | "content_unavailable";
 
 export type AnswerWindowStatus = {
   accepting: boolean;
@@ -696,6 +738,10 @@ export function getAnswerWindowStatus(
     endsAtMs: state.endsAtMs,
   };
 
+  if (!isQuestionContentAvailable(roomId)) {
+    return { ...snapshot, accepting: false, reason: "content_unavailable" };
+  }
+
   if (!state.running) {
     return { ...snapshot, accepting: false, reason: "game_paused" };
   }
@@ -719,6 +765,11 @@ export function getAnswerWindowStatus(
  * Get current quiz state (for /state endpoint)
  */
 export function getCurrentState(roomId: string = DEFAULT_ROOM_ID): QuizState {
+  if (!isQuestionContentAvailable(roomId)) {
+    const error = new Error("Canonical quiz content is temporarily unavailable") as Error & { statusCode: number };
+    error.statusCode = 503;
+    throw error;
+  }
   return buildQuizState(roomId);
 }
 
@@ -753,6 +804,10 @@ export function start(roomId: string = DEFAULT_ROOM_ID): boolean {
   }
   if (!isGameplayRoomSupported(roomId)) {
     console.log(`[Controller] Cannot start inactive room: ${roomId}`);
+    return false;
+  }
+  if (!isQuestionContentAvailable(roomId)) {
+    console.error(`[Controller] Cannot start room ${roomId}: canonical content is unavailable`);
     return false;
   }
   const state = getControllerState(roomId);
@@ -982,7 +1037,7 @@ export function getStatus(roomId: string = DEFAULT_ROOM_ID): {
   phase: QuizPhase;
   questionIndex: number;
   totalQuestions: number;
-  questionSource: "active_pool" | "legacy_fallback";
+  questionSource: "active_pool" | "legacy_fallback" | "canonical_unavailable";
   scoringMode: "flat" | "v2";
   endsAtMs: number;
   timeRemainingMs: number;
@@ -998,7 +1053,9 @@ export function getStatus(roomId: string = DEFAULT_ROOM_ID): {
     phase: state.phase,
     questionIndex: state.questionIndex,
     totalQuestions: getTotalQuestions(roomId),
-    questionSource: activePoolSize > 0 ? "active_pool" : "legacy_fallback",
+    questionSource: activePoolSize > 0 && isQuestionContentAvailable(roomId)
+      ? "active_pool"
+      : isCanonicalContentRequired() ? "canonical_unavailable" : "legacy_fallback",
     scoringMode: getScoringMode(),
     endsAtMs: state.endsAtMs,
     timeRemainingMs: Math.max(0, state.endsAtMs - Date.now()),

@@ -6,6 +6,7 @@
 import { Router, Request, Response } from "express";
 import { addClient, removeClient } from "../sse/broker";
 import { DEFAULT_ROOM_ID, isGameplayRoomSupported, requireRoom } from "../state/rooms";
+import { isQuestionContentAvailable } from "../engine/roundController";
 
 const router = Router();
 
@@ -24,6 +25,14 @@ function handleEvents(req: Request, res: Response, roomId: string): void {
     res.status(409).json({
       error: "Room is closed",
       roomId,
+    });
+    return;
+  }
+  if (!isQuestionContentAvailable(roomId)) {
+    res.status(503).json({
+      ok: false,
+      reason: "canonical_content_unavailable",
+      error: "Canonical quiz content is temporarily unavailable",
     });
     return;
   }

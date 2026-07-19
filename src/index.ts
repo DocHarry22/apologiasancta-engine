@@ -32,6 +32,15 @@ import { stopRateLimitCleanup } from "./routes/register";
 import { assertProductionJoinSecret } from "./security/joinToken";
 import { assertAccountIdentityConfiguration } from "./security/accountIdentity";
 import { initializeQuizRuntime } from "./startup/runtimeInitialization";
+import {
+  assertCanonicalContentConfiguration,
+  getCanonicalContentConfig,
+  getCanonicalContentStatus,
+  refreshCanonicalContent,
+  startCanonicalContentRefreshLoop,
+  stopCanonicalContentRefreshLoop,
+} from "./content/canonical";
+import { assertProductionAdminToken } from "./security/adminToken";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -39,11 +48,9 @@ const OPEN_SECONDS = process.env.OPEN_SECONDS || "25";
 const LOCK_SECONDS = process.env.LOCK_SECONDS || "2";
 const REVEAL_SECONDS = process.env.REVEAL_SECONDS || "12";
 
+assertCanonicalContentConfiguration();
+assertProductionAdminToken();
 if (process.env.NODE_ENV === "production") {
-  const missing = ["ADMIN_TOKEN"].filter((name) => !process.env[name]?.trim());
-  if (missing.length > 0) {
-    throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
-  }
   assertProductionJoinSecret();
 }
 // The opt-in exchange must fail fast in every environment when enabled with an
@@ -73,8 +80,12 @@ configureStatePersistence({
 const app = createApp();
 
 async function main() {
+  const canonicalConfig = getCanonicalContentConfig();
   const githubConfig = getGitHubSyncConfig();
-  if (githubConfig) {
+  if (canonicalConfig) {
+    console.log("[Startup] Canonical content API configured");
+    console.log("[Startup] Refreshing published live questions before opening answer windows...");
+  } else if (githubConfig) {
     console.log(
       `[Startup] GitHub repo: ${githubConfig.owner}/${githubConfig.repo} `
       + `(branch: ${githubConfig.branch}, path: ${githubConfig.contentPath})`
@@ -90,20 +101,29 @@ async function main() {
     holdRuntimeStarts: holdQuizRuntimeStarts,
     releaseRuntimeStarts: releaseQuizRuntimeStarts,
     restorePersistedState,
-    hasGitHubSyncConfig: () => githubConfig !== null,
-    syncFromGitHub,
-    startAutomaticQuizRuntime,
+    hasGitHubSyncConfig: () => canonicalConfig !== null || githubConfig !== null,
+    syncFromGitHub: canonicalConfig ? refreshCanonicalContent : syncFromGitHub,
+    startAutomaticQuizRuntime: () => {
+      const contentStatus = getCanonicalContentStatus();
+      return contentStatus.required && !contentStatus.ready ? [] : startAutomaticQuizRuntime();
+    },
   });
   const { restored, automaticRooms, syncResult } = initialization;
 
   if (syncResult?.success) {
-    console.log(`[Startup] Synced ${syncResult.questionsLoaded} questions from ${syncResult.topicsLoaded} topics`);
+    console.log(`[Startup] Validated ${syncResult.questionsLoaded} questions from ${syncResult.topicsLoaded} topics`);
   } else if (syncResult) {
     console.warn(
       `[Startup] Catalog sync failed safely; retained restored catalog (${syncResult.errors.length} error(s))`
     );
     syncResult.errors.forEach((error) => console.warn(`  - ${error}`));
   }
+
+  const canonicalStatus = getCanonicalContentStatus();
+  if (canonicalStatus.required && !canonicalStatus.ready) {
+    throw new Error("Canonical content is required but no validated restart-safe catalog is available");
+  }
+  const periodicContentRefresh = startCanonicalContentRefreshLoop();
 
   if (automaticRooms.length > 0) {
     console.log(
@@ -120,6 +140,7 @@ async function main() {
     console.log(`[Shutdown] Received ${signal}; flushing runtime state...`);
 
     stopRateLimitCleanup();
+    stopCanonicalContentRefreshLoop();
 
     try {
       await shutdownPersistence();
@@ -159,7 +180,7 @@ async function main() {
 
   server = app.listen(port, host, () => {
     const ytConfigured = process.env.YOUTUBE_API_KEY ? "✓" : "✗";
-    const ghConfigured = getGitHubSyncConfig() ? "✓" : "✗";
+    const contentConfigured = getCanonicalContentConfig() || getGitHubSyncConfig() ? "✓" : "✗";
     const scoringMode = getScoringMode();
     console.log(`
 ╔═══════════════════════════════════════════════════════╗
@@ -174,7 +195,7 @@ async function main() {
 ║    POST /answer    - Submit answer                    ║
 ║    POST /admin/*   - Admin controls                   ║
 ║    POST /admin/youtube/* - YouTube chat (${ytConfigured} API key)     ║
-║    POST /admin/content/sync - Sync from GitHub (${ghConfigured})     ║
+║    POST /admin/content/refresh - Refresh content (${contentConfigured})  ║
 ╠═══════════════════════════════════════════════════════╣
 ║  Phase Durations:                                     ║
 ║    OPEN: ${OPEN_SECONDS.padStart(2)}s   LOCK: ${LOCK_SECONDS.padStart(2)}s   REVEAL: ${REVEAL_SECONDS.padStart(2)}s           ║
@@ -184,6 +205,11 @@ async function main() {
     console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
     console.log(`[Config] Runtime persistence: ${getPersistenceStatus().driver} @ ${getStatePersistencePath()}`);
     console.log("[Config] Use POST /admin/persistence/save to force a runtime snapshot");
+    console.log(
+      periodicContentRefresh
+        ? "[Config] Periodic canonical content refresh enabled"
+        : "[Config] Canonical content refresh is manual or not configured"
+    );
     console.log(
       automaticRooms.length > 0
         ? `[Config] Automatic quiz runtime active for: ${automaticRooms.join(", ")}`

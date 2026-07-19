@@ -50,12 +50,14 @@ export function processAnswer(req: Request, res: Response, roomId: string): void
 
   const answerWindow = getAnswerWindowStatus(roomId);
   if (!answerWindow.accepting) {
-    res.status(409).json({
+    res.status(answerWindow.reason === "content_unavailable" ? 503 : 409).json({
       ok: false,
       accepted: false,
       reason: answerWindow.reason,
       error: answerWindow.reason === "too_late"
         ? "Answer deadline has passed"
+        : answerWindow.reason === "content_unavailable"
+          ? "Canonical quiz content is temporarily unavailable"
         : answerWindow.reason === "game_paused"
           ? "Quiz is paused"
           : "Answers are locked",

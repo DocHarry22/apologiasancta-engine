@@ -33,11 +33,9 @@ import { DEFAULT_ROOM_ID, createRoom, listRooms, requireRoom } from "../state/ro
 import { closeGameplayRoom } from "../state/roomLifecycle";
 import { getClientCountForRoom } from "../sse/broker";
 import type { LoopMode } from "../types/quiz";
+import { verifyAdminToken } from "../security/adminToken";
 
 const router = Router();
-
-/** Admin token from environment */
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
 
 /**
  * Middleware to verify admin token
@@ -45,8 +43,12 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "dev-admin-token";
  */
 export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const token = req.headers["x-admin-token"] || req.headers["admin-token"];
-
-  if (token !== ADMIN_TOKEN) {
+  const verification = verifyAdminToken(token);
+  if (verification === "not_configured") {
+    res.status(503).json({ error: "Admin authentication is not configured" });
+    return;
+  }
+  if (verification !== "valid") {
     res.status(401).json({ error: "Unauthorized - Invalid admin token" });
     return;
   }

@@ -4,7 +4,8 @@ services:
     runtime: node
     plan: free
     branch: main
-    autoDeploy: true
+    # Production releases are promoted explicitly after migration/content checks.
+    autoDeploy: false
     # NODE_ENV=production makes npm omit devDependencies unless they are
     # explicitly included. TypeScript and its type definitions are build-time
     # dependencies, so Render must install them before running `tsc`.
@@ -18,6 +19,18 @@ services:
         value: 10000
       - key: ADMIN_TOKEN
         sync: false
+      - key: CONTENT_API_REQUIRED
+        value: "true"
+      - key: CONTENT_API_URL
+        sync: false
+      - key: CONTENT_API_TOKEN
+        sync: false
+      - key: CONTENT_API_TIMEOUT_MS
+        value: "10000"
+      - key: CONTENT_API_MAX_BYTES
+        value: "5242880"
+      - key: CONTENT_API_REFRESH_INTERVAL_MS
+        value: "300000"
       - key: PLAYER_JOIN_SECRET
         sync: false
       - key: ACCOUNT_IDENTITY_ENABLED

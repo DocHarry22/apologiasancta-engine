@@ -7,6 +7,7 @@
 
 import { getTotalBankSize, getTopicSummaries, replaceCatalogAtomically } from "./bank";
 import { UIQuestion, validateQuestion } from "./validate";
+import { isCanonicalContentRequired } from "./canonical";
 
 export interface GitHubSyncConfig {
   owner: string;
@@ -324,6 +325,14 @@ function resolveSyncTimeoutMs(): number {
  * validation failure leaves the restored/live catalog unchanged.
  */
 export async function syncFromGitHub(): Promise<GitHubSyncResult> {
+  if (isCanonicalContentRequired()) {
+    return {
+      success: false,
+      topicsLoaded: 0,
+      questionsLoaded: 0,
+      errors: ["GitHub catalog sync is disabled while canonical content is required"],
+    };
+  }
   const config = getGitHubSyncConfig();
   if (!config) {
     return {
