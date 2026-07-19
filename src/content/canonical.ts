@@ -10,6 +10,7 @@ import {
   type PersistedCanonicalContentCache,
 } from "./bank";
 import type { UIChoiceId, UIQuestion } from "./validate";
+import { assertCanonicalGovernanceRecord } from "./governance";
 
 const CHOICE_IDS: UIChoiceId[] = ["A", "B", "C", "D"];
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -182,7 +183,7 @@ function extractText(value: unknown, depth = 0): string | undefined {
 
   const record = asRecord(value);
   if (!record) return undefined;
-  for (const key of ["text", "body", "content", "value", "label", "prompt", "blocks"]) {
+  for (const key of ["text", "body", "content", "value", "label", "citation", "prompt", "blocks"]) {
     const extracted = extractText(record[key], depth + 1);
     if (extracted) return extracted;
   }
@@ -234,6 +235,7 @@ function mapCanonicalQuestion(
   const record = asRecord(value);
   if (!record) throw new Error("question entry must be an object");
   if (isExplicitlyExcluded(record)) return null;
+  assertCanonicalGovernanceRecord(record);
 
   const questionType = readString(record, "questionType", "question_type", "type");
   if (questionType && !["multiple_choice", "single_choice", "mcq", "multiple-choice"].includes(questionType)) {
