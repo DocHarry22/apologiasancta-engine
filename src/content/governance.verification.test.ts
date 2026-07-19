@@ -44,6 +44,12 @@ test("engine rejects ambiguous or incompletely explained assessment content", ()
     () => assertCanonicalGovernanceRecord(validRecord({ qualityFlags: { ambiguous: true } })),
     /prohibited_quality_flag/,
   );
+  assert.throws(
+    () => assertCanonicalGovernanceRecord(validRecord({
+      correctOptionId: "b",
+    })),
+    /one_best_answer_required/,
+  );
   const record = validRecord();
   (record.options as Array<Record<string, unknown>>)[2]!.explanation = "";
   assert.throws(() => assertCanonicalGovernanceRecord(record), /option_explanation_required/);
