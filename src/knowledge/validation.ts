@@ -102,6 +102,17 @@ export function parseContentState(value: unknown, fallback: KnowledgeContentStat
   return text as KnowledgeContentState;
 }
 
+export function parseAuthoringContentState(
+  value: unknown,
+  fallback: KnowledgeContentState = "draft"
+): KnowledgeContentState {
+  const state = parseContentState(value, fallback);
+  if (state === "published") {
+    invalid("published state can only be reached through the governed publication endpoint");
+  }
+  return state;
+}
+
 export function parseAssessmentPosition(value: unknown): AssessmentPosition {
   const text = boundedText(value, "position", 40) as string;
   if (!(ASSESSMENT_POSITIONS as readonly string[]).includes(text)) invalid(`unsupported assessment position: ${text}`);
@@ -143,7 +154,7 @@ export function validateNodeInput(value: unknown): ValidatedNodeInput {
     ...(proposition ? { proposition } : {}),
     ...(summary ? { summary } : {}),
     ...(language ? { language } : {}),
-    contentState: parseContentState(input.contentState),
+    contentState: parseAuthoringContentState(input.contentState),
     metadata: asMetadata(input.metadata),
     aliases: asStringArray(input.aliases, "aliases", 30),
   };
@@ -172,7 +183,7 @@ export function validateEdgeInput(value: unknown): ValidatedEdgeInput {
     fromNodeId,
     toNodeId,
     relationshipType,
-    contentState: parseContentState(input.contentState),
+    contentState: parseAuthoringContentState(input.contentState),
     metadata: asMetadata(input.metadata),
   };
 }
