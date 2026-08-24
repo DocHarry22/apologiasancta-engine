@@ -21,6 +21,7 @@ import {
   searchKnowledge,
   upsertAssessment,
 } from "../knowledge/repository";
+import { getEdgeForAuthoring, getExistingCanonicalIds } from "../knowledge/importSupport";
 
 const router = Router();
 router.use(requireAdmin);
@@ -53,6 +54,15 @@ router.post("/edges", asyncRoute(async (req, res) => {
 
 router.patch("/edges/:id", asyncRoute(async (req, res) => {
   const edge = await reviseEdge(req.params.id, req.body, actor(req));
+  res.json(edge);
+}));
+
+router.get("/edges/:id", asyncRoute(async (req, res) => {
+  const edge = await getEdgeForAuthoring(req.params.id);
+  if (!edge) {
+    res.status(404).json({ error: "Knowledge edge not found" });
+    return;
+  }
   res.json(edge);
 }));
 
@@ -106,6 +116,11 @@ router.get("/reconcile", asyncRoute(async (req, res) => {
   }
   const suggestions = await reconciliationSuggestions(req.query.q, req.query.kind, req.query.limit);
   res.json({ suggestions, advisory: "Similarity suggestions never merge records automatically." });
+}));
+
+router.post("/existing", asyncRoute(async (req, res) => {
+  const ids = await getExistingCanonicalIds(req.body?.ids);
+  res.json({ existingIds: [...ids].sort() });
 }));
 
 router.get("/nodes/:id/evidence", asyncRoute(async (req, res) => {
