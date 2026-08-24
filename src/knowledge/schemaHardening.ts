@@ -45,7 +45,7 @@ BEGIN
     );
 
   IF assertion_count < 1 THEN
-    RAISE EXCEPTION 'knowledge edge publication requires an approved attributable assertion with published source evidence and an approved citation for this revision';
+    RAISE EXCEPTION 'knowledge edge publication requires an approved assertion for the published revision; specifically an approved attributable assertion with published source evidence and an approved citation for this revision';
   END IF;
 
   RETURN NEW;
