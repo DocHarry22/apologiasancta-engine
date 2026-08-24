@@ -1,13 +1,14 @@
 {
   "name": "apologiasancta-engine",
   "version": "1.0.0",
-  "description": "Backend engine for Apologia Sancta Live quiz",
+  "description": "Backend engine for Apologia Sancta live quiz and canonical apologetics knowledge services",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/backend.verification.test.ts src/canonicalContent.verification.test.ts src/content/governance.verification.test.ts src/deployment.verification.test.ts src/identity.verification.test.ts src/releases.verification.test.ts src/runtimeSafety.verification.test.ts",
+    "knowledge:migrate": "node dist/knowledge/migrate.js",
+    "test": "node --import tsx --test src/backend.verification.test.ts src/canonicalContent.verification.test.ts src/content/governance.verification.test.ts src/deployment.verification.test.ts src/identity.verification.test.ts src/knowledge.verification.test.ts src/releases.verification.test.ts src/runtimeSafety.verification.test.ts",
     "content:lint": "node --import tsx --test src/content/governance.verification.test.ts"
   },
   "keywords": [],
