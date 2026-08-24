@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import adminRouter from "./routes/admin";
+import adminKnowledgeRouter from "./routes/adminKnowledge";
 import adminYoutubeRouter from "./routes/adminYoutube";
 import answerRouter from "./routes/answer";
 import contentAdminRouter from "./routes/content";
@@ -9,6 +10,7 @@ import diagnosticsRouter from "./routes/diagnostics";
 import eventsRouter from "./routes/events";
 import healthRouter from "./routes/health";
 import identityRouter from "./routes/identity";
+import knowledgeRouter from "./routes/knowledge";
 import leaderboardRouter from "./routes/leaderboard";
 import registerRouter from "./routes/register";
 import { adminReleasesRouter, releasesRouter } from "./routes/releases";
@@ -59,10 +61,13 @@ export function createApp(): express.Application {
   app.use("/leaderboard", leaderboardRouter);
   app.use("/topics", topicsRouter);
   app.use("/releases", releasesRouter);
-  app.use("/admin", adminRouter);
+  app.use("/knowledge", knowledgeRouter);
+  // Mount specific admin surfaces before the generic admin controller.
+  app.use("/admin/knowledge", adminKnowledgeRouter);
   app.use("/admin/releases", adminReleasesRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
   app.use("/admin", contentAdminRouter);
+  app.use("/admin", adminRouter);
 
   app.get("/", (_req, res) => {
     res.json({
@@ -71,6 +76,9 @@ export function createApp(): express.Application {
       endpoints: {
         health: "GET /health",
         diagnostics: "GET /diagnostics",
+        knowledge: "GET /knowledge/status",
+        knowledgeSearch: "GET /knowledge/search?q=...",
+        knowledgeNeighborhood: "GET /knowledge/neighborhood?nodeId=...&depth=2&lens=catholic",
         accountIdentity: "POST /identity/exchange",
         state: "GET /state?roomId=...",
         events: "GET /events?roomId=...&userId=...",
