@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import adminRouter from "./routes/admin";
 import adminKnowledgeRouter from "./routes/adminKnowledge";
+import adminKnowledgeJourneysRouter from "./routes/adminKnowledgeJourneys";
 import adminYoutubeRouter from "./routes/adminYoutube";
 import answerRouter from "./routes/answer";
 import contentAdminRouter from "./routes/content";
@@ -11,6 +12,7 @@ import eventsRouter from "./routes/events";
 import healthRouter from "./routes/health";
 import identityRouter from "./routes/identity";
 import knowledgeRouter from "./routes/knowledge";
+import knowledgeJourneysRouter from "./routes/knowledgeJourneys";
 import leaderboardRouter from "./routes/leaderboard";
 import registerRouter from "./routes/register";
 import { adminReleasesRouter, releasesRouter } from "./routes/releases";
@@ -61,8 +63,12 @@ export function createApp(): express.Application {
   app.use("/leaderboard", leaderboardRouter);
   app.use("/topics", topicsRouter);
   app.use("/releases", releasesRouter);
+  app.use("/knowledge", knowledgeJourneysRouter);
   app.use("/knowledge", knowledgeRouter);
-  // Mount specific admin surfaces before the generic admin controller.
+  // Mount specific admin surfaces before the generic admin controller. Journey
+  // authoring has its own namespace so its review/publish routes cannot shadow
+  // the canonical node/edge/source review and publication contracts.
+  app.use("/admin/knowledge/journeys", adminKnowledgeJourneysRouter);
   app.use("/admin/knowledge", adminKnowledgeRouter);
   app.use("/admin/releases", adminReleasesRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
@@ -79,6 +85,10 @@ export function createApp(): express.Application {
         knowledge: "GET /knowledge/status",
         knowledgeSearch: "GET /knowledge/search?q=...",
         knowledgeNeighborhood: "GET /knowledge/neighborhood?nodeId=...&depth=2&lens=catholic",
+        knowledgeTopics: "GET /knowledge/topics",
+        knowledgePath: "GET /knowledge/paths/:id",
+        knowledgeArgument: "GET /knowledge/arguments/:id",
+        knowledgeJourneyAdmin: "POST /admin/knowledge/journeys/topics|paths|arguments",
         accountIdentity: "POST /identity/exchange",
         state: "GET /state?roomId=...",
         events: "GET /events?roomId=...&userId=...",

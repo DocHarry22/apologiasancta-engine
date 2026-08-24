@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { KNOWLEDGE_SCHEMA_SQL, KNOWLEDGE_SCHEMA_VERSION } from "./knowledge/schema";
 import { KNOWLEDGE_SCHEMA_HARDENING_SQL } from "./knowledge/schemaHardening";
+import { validateArgumentDraft, validatePathDraft, validateTopicDraft } from "./knowledge/journeys";
 import {
   canonicalId,
   KnowledgeInputError,
@@ -52,8 +53,8 @@ test("publication and assessment states use explicit bounded vocabularies", () =
   assert.throws(() => parseContentState("truthy"), /unsupported content state/);
 });
 
-test("schema v2 separates current authoring revisions from immutable published revisions", () => {
-  assert.equal(KNOWLEDGE_SCHEMA_VERSION, 2);
+test("schema v3 separates current authoring revisions from immutable published revisions and adds curated journeys", () => {
+  assert.equal(KNOWLEDGE_SCHEMA_VERSION, 3);
   for (const required of [
     "published_revision_id",
     "node_revision_id",
@@ -61,9 +62,50 @@ test("schema v2 separates current authoring revisions from immutable published r
     "uq_knowledge_assessment_revision_lens",
     "idx_knowledge_nodes_published_revision",
     "idx_knowledge_edges_published_revision",
+    "knowledge_topics",
+    "knowledge_topic_versions",
+    "knowledge_topic_nodes",
+    "knowledge_paths",
+    "knowledge_path_versions",
+    "knowledge_path_nodes",
+    "knowledge_arguments",
+    "knowledge_argument_versions",
+    "knowledge_argument_members",
+    "idx_knowledge_path_nodes_path",
+    "idx_knowledge_argument_members_argument",
   ]) {
     assert.match(KNOWLEDGE_SCHEMA_SQL, new RegExp(required));
   }
+});
+
+test("journey validators are bounded, typed, and cannot publish directly", () => {
+  const topic = validateTopicDraft({
+    id: "topic:trinity",
+    title: "The Trinity",
+    rootNodeId: "claim:one-god-three-persons",
+    featuredNodeIds: ["scripture:matthew-28-19"],
+  });
+  assert.equal(topic.rootNodeId, "claim:one-god-three-persons");
+  const path = validatePathDraft({
+    id: "path:trinity-guided",
+    title: "Trinity guided path",
+    pathType: "guided",
+    steps: [{ nodeId: "claim:one-god-three-persons" }],
+  });
+  assert.equal(path.steps.length, 1);
+  const argument = validateArgumentDraft({
+    id: "argument:trinity-case",
+    title: "Trinity case",
+    argumentType: "doctrinal",
+    conclusionNodeId: "claim:one-god-three-persons",
+    members: [{ nodeId: "scripture:matthew-28-19", role: "evidence" }],
+  });
+  assert.equal(argument.members[0]?.role, "evidence");
+  assert.throws(() => validateTopicDraft({ title: "T", rootNodeId: "claim:a", contentState: "published" }), KnowledgeInputError);
+  assert.throws(() => validatePathDraft({ title: "P", pathType: "secret", steps: [{ nodeId: "claim:a" }] }), /unsupported pathType/);
+  assert.throws(() => validatePathDraft({ title: "P", pathType: "guided", steps: [] }), /at least one step/);
+  assert.throws(() => validateArgumentDraft({ title: "A", argumentType: "magic", conclusionNodeId: "claim:a" }), /unsupported argumentType/);
+  assert.throws(() => validateArgumentDraft({ title: "A", argumentType: "textual", conclusionNodeId: "claim:a", members: [{ nodeId: "claim:b", role: "truth_score" }] }), /unsupported argument member role/);
 });
 
 test("schema encodes provenance, immutable revisions, review evidence, and bounded graph indexes", () => {
