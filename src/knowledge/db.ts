@@ -1,6 +1,7 @@
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { KNOWLEDGE_SCHEMA_SQL, KNOWLEDGE_SCHEMA_VERSION } from "./schema";
 import { KNOWLEDGE_SCHEMA_HARDENING_SQL } from "./schemaHardening";
+import { KNOWLEDGE_ADVANCED_SCHEMA_SQL } from "./schemaAdvanced";
 
 let pool: Pool | null = null;
 let ready = false;
@@ -46,6 +47,7 @@ export async function ensureKnowledgeSchema(): Promise<void> {
       await client.query("BEGIN");
       await client.query(KNOWLEDGE_SCHEMA_SQL);
       await client.query(KNOWLEDGE_SCHEMA_HARDENING_SQL);
+      await client.query(KNOWLEDGE_ADVANCED_SCHEMA_SQL);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -100,6 +102,7 @@ export function getKnowledgeEngineStatus() {
     ready,
     schemaVersion,
     expectedSchemaVersion: KNOWLEDGE_SCHEMA_VERSION,
+    advancedSchema: true,
     lastError,
   };
 }
