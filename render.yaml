@@ -10,7 +10,9 @@ services:
     # explicitly included. TypeScript and its type definitions are build-time
     # dependencies, so Render must install them before running `tsc`.
     buildCommand: npm ci --include=dev && npm run build
-    startCommand: npm start
+    # Fail deployment before opening traffic if the versioned Knowledge Engine
+    # schema cannot be applied to managed PostgreSQL.
+    startCommand: npm run knowledge:migrate && npm start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
@@ -31,6 +33,10 @@ services:
         value: "5242880"
       - key: CONTENT_API_REFRESH_INTERVAL_MS
         value: "300000"
+      - key: KNOWLEDGE_ENGINE_REQUIRED
+        value: "true"
+      - key: KNOWLEDGE_DB_POOL_MAX
+        value: "6"
       - key: PLAYER_JOIN_SECRET
         sync: false
       - key: ACCOUNT_IDENTITY_ENABLED
