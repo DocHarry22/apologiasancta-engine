@@ -1,9 +1,13 @@
+import type { PoolClient } from "pg";
 import { queryKnowledge, withKnowledgeTransaction } from "./db";
-import { assertCanonicalId, objectId, requireObject, requireText, stableHash } from "./validation";
+import { KnowledgeConflictError } from "./repository";
+import { assertCanonicalId, KnowledgeInputError, objectId, requireObject, requireText, stableHash } from "./validation";
 
 const MAX_TIMELINE = 200;
 const MAX_COMPARE_NEIGHBORS = 60;
 const MAX_PATH_DEPTH = 4;
+const MAX_PATH_EXPANDED_ROWS = 480;
+const MAX_PATH_FRONTIER = 80;
 const MAX_PROPOSALS = 100;
 const PROPOSAL_TYPES = new Set([
   "duplicate_candidate",
@@ -86,19 +90,6 @@ async function recordObservation(
   return observation;
 }
 
-function timelineDate(metadata: Record<string, unknown>): { year: number; date?: string } | null {
-  const rawDate = text(metadata.date) ?? text(metadata.eventDate) ?? text(metadata.startDate);
-  if (rawDate) {
-    const match = /^(-?\d{1,6})(?:-(\d{2})-(\d{2}))?$/.exec(rawDate);
-    if (match) {
-      const year = Number.parseInt(match[1]!, 10);
-      return { year, ...(match[2] && match[3] ? { date: rawDate } : {}) };
-    }
-  }
-  const year = parseYear(metadata.year ?? metadata.eventYear ?? metadata.startYear);
-  return year === null ? null : { year };
-}
-
 export async function getPublishedTimeline(options: {
   nodeId?: unknown;
   topicId?: unknown;
@@ -117,59 +108,85 @@ export async function getPublishedTimeline(options: {
   const toYear = parseYear(options.to);
   const limit = boundedInteger(options.limit, 100, 1, MAX_TIMELINE);
   if (fromYear !== null && toYear !== null && fromYear > toYear) {
-    throw new Error("timeline from year must not be after to year");
+    throw new KnowledgeInputError("timeline from year must not be after to year");
   }
 
   const params: unknown[] = [];
-  const clauses = ["n.published_revision_id IS NOT NULL", "n.kind='event'"];
+  const baseClauses = ["n.published_revision_id IS NOT NULL", "n.kind='event'"];
   let joins = "";
   if (topicId) {
     params.push(topicId);
     joins += " JOIN knowledge_topic_nodes tn ON tn.node_id=n.id JOIN knowledge_topics t ON t.id=tn.topic_id";
-    clauses.push(`t.id=$${params.length}`, "t.published_revision_id IS NOT NULL");
+    baseClauses.push(`t.id=$${params.length}`, "t.published_revision_id IS NOT NULL");
   }
   if (domain) {
     params.push(domain);
-    clauses.push(`LOWER(COALESCE(n.metadata->>'domain',''))=$${params.length}`);
+    baseClauses.push(`LOWER(COALESCE(n.metadata->>'domain',''))=$${params.length}`);
   }
   if (nodeId) {
     params.push(nodeId);
-    clauses.push(`(n.id=$${params.length} OR EXISTS (
+    baseClauses.push(`(n.id=$${params.length} OR EXISTS (
       SELECT 1 FROM knowledge_edges e
       WHERE e.published_revision_id IS NOT NULL
         AND ((e.from_node_id=$${params.length} AND e.to_node_id=n.id)
           OR (e.to_node_id=$${params.length} AND e.from_node_id=n.id))
     ))`);
   }
-  params.push(Math.min(MAX_TIMELINE * 3, limit * 3));
+
+  const dateValue = "COALESCE(NULLIF(n.metadata->>'date',''),NULLIF(n.metadata->>'eventDate',''),NULLIF(n.metadata->>'startDate',''))";
+  const yearValue = "COALESCE(NULLIF(n.metadata->>'year',''),NULLIF(n.metadata->>'eventYear',''),NULLIF(n.metadata->>'startYear',''))";
+  const chronologyYear = `(CASE
+    WHEN ${dateValue} ~ '^-?[0-9]{1,6}(-[0-9]{2}-[0-9]{2})?$'
+      THEN substring(${dateValue} from '^-?[0-9]{1,6}')::integer
+    WHEN ${yearValue} ~ '^-?[0-9]{1,6}$' THEN ${yearValue}::integer
+    ELSE NULL END)`;
+  const chronologyDate = `(CASE
+    WHEN ${dateValue} ~ '^-?[0-9]{1,6}-[0-9]{2}-[0-9]{2}$' THEN ${dateValue}
+    ELSE NULL END)`;
+  const chronologyClauses = ["chronology_year IS NOT NULL"];
+  if (fromYear !== null) {
+    params.push(fromYear);
+    chronologyClauses.push(`chronology_year >= $${params.length}`);
+  }
+  if (toYear !== null) {
+    params.push(toYear);
+    chronologyClauses.push(`chronology_year <= $${params.length}`);
+  }
+  params.push(limit);
   const rows = await queryKnowledge(
-    `SELECT DISTINCT n.* FROM knowledge_nodes n${joins}
-     WHERE ${clauses.join(" AND ")}
-     ORDER BY n.id LIMIT $${params.length}`,
+    `WITH candidates AS (
+       SELECT DISTINCT n.*,${chronologyYear} AS chronology_year,${chronologyDate} AS chronology_date
+       FROM knowledge_nodes n${joins}
+       WHERE ${baseClauses.join(" AND ")}
+     )
+     SELECT * FROM candidates
+     WHERE ${chronologyClauses.join(" AND ")}
+     ORDER BY chronology_year,COALESCE(chronology_date,''),id
+     LIMIT $${params.length}`,
     params,
   );
 
-  const entries = rows
-    .map((row) => {
-      const node = nodeFromRow(row as Row);
-      const chronology = timelineDate(node.metadata);
-      if (!chronology) return null;
-      const provenanceIds = Array.isArray(node.metadata.provenanceIds)
-        ? node.metadata.provenanceIds.filter((value): value is string => typeof value === "string").slice(0, 50)
-        : [];
-      return { ...chronology, node, provenanceIds };
-    })
-    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
-    .filter((entry) => fromYear === null || entry.year >= fromYear)
-    .filter((entry) => toYear === null || entry.year <= toYear)
-    .sort((a, b) => a.year - b.year || (a.date ?? "").localeCompare(b.date ?? "") || a.node.id.localeCompare(b.node.id))
-    .slice(0, limit);
+  const entries = rows.map((row) => {
+    const item = row as Row;
+    const node = nodeFromRow(item);
+    const provenanceIds = Array.isArray(node.metadata.provenanceIds)
+      ? node.metadata.provenanceIds.filter((value): value is string => typeof value === "string").slice(0, 50)
+      : [];
+    const date = text(item.chronology_date);
+    return {
+      year: Number(item.chronology_year),
+      ...(date ? { date } : {}),
+      node,
+      provenanceIds,
+    };
+  });
 
   return {
     entries,
     meta: {
       bounded: true,
       undatedRecordsExcluded: true,
+      chronologyFilteredBeforeLimit: true,
       instrumentation: await recordObservation("timeline", startedAt, { nodeCount: entries.length, resultCount: entries.length }),
     },
   };
@@ -180,11 +197,61 @@ async function publishedNode(id: string): Promise<Row | null> {
   return (rows[0] as Row | undefined) ?? null;
 }
 
+function reconstructPath(parent: Map<string, string>, left: string, right: string): string[] | null {
+  const path = [right];
+  let cursor = right;
+  while (cursor !== left) {
+    const previous = parent.get(cursor);
+    if (!previous) return null;
+    path.push(previous);
+    cursor = previous;
+  }
+  return path.reverse();
+}
+
+async function findBoundedPublishedPath(left: string, right: string): Promise<{ path: string[] | null; expandedRows: number }> {
+  let frontier = [left];
+  const visited = new Set([left]);
+  const parent = new Map<string, string>();
+  let expandedRows = 0;
+
+  for (let depth = 0; depth < MAX_PATH_DEPTH && frontier.length > 0 && expandedRows < MAX_PATH_EXPANDED_ROWS; depth += 1) {
+    const remainingRows = MAX_PATH_EXPANDED_ROWS - expandedRows;
+    const edgeRows = await queryKnowledge<{ from_node_id: string; to_node_id: string }>(
+      `SELECT from_node_id,to_node_id FROM knowledge_edges
+       WHERE published_revision_id IS NOT NULL
+         AND (from_node_id=ANY($1::text[]) OR to_node_id=ANY($1::text[]))
+       ORDER BY id LIMIT $2`,
+      [frontier, remainingRows],
+    );
+    expandedRows += edgeRows.length;
+    const frontierSet = new Set(frontier);
+    const next: string[] = [];
+
+    for (const edge of edgeRows) {
+      const candidates: Array<[string, string]> = [];
+      if (frontierSet.has(edge.from_node_id)) candidates.push([edge.from_node_id, edge.to_node_id]);
+      if (frontierSet.has(edge.to_node_id)) candidates.push([edge.to_node_id, edge.from_node_id]);
+      for (const [from, neighbor] of candidates) {
+        if (visited.has(neighbor)) continue;
+        parent.set(neighbor, from);
+        if (neighbor === right) return { path: reconstructPath(parent, left, right), expandedRows };
+        if (next.length >= MAX_PATH_FRONTIER) continue;
+        visited.add(neighbor);
+        next.push(neighbor);
+      }
+    }
+    frontier = next;
+  }
+
+  return { path: null, expandedRows };
+}
+
 export async function comparePublishedNodes(leftValue: unknown, rightValue: unknown, lensValue?: unknown) {
   const startedAt = Date.now();
   const left = assertCanonicalId(leftValue, "left");
   const right = assertCanonicalId(rightValue, "right");
-  if (left === right) throw new Error("left and right must identify different nodes");
+  if (left === right) throw new KnowledgeInputError("left and right must identify different nodes");
   const [leftRow, rightRow] = await Promise.all([publishedNode(left), publishedNode(right)]);
   if (!leftRow || !rightRow) return null;
 
@@ -230,21 +297,7 @@ export async function comparePublishedNodes(leftValue: unknown, rightValue: unkn
      ORDER BY a.node_id,a.lens LIMIT 100`,
     assessmentParams,
   );
-  const pathRows = await queryKnowledge<{ path: string[]; depth: number }>(
-    `WITH RECURSIVE walk(node_id,path,depth) AS (
-       SELECT $1::text,ARRAY[$1::text],0
-       UNION ALL
-       SELECT CASE WHEN e.from_node_id=w.node_id THEN e.to_node_id ELSE e.from_node_id END,
-              w.path || CASE WHEN e.from_node_id=w.node_id THEN e.to_node_id ELSE e.from_node_id END,
-              w.depth+1
-       FROM walk w JOIN knowledge_edges e
-         ON e.published_revision_id IS NOT NULL AND (e.from_node_id=w.node_id OR e.to_node_id=w.node_id)
-       WHERE w.depth<$3
-         AND NOT (CASE WHEN e.from_node_id=w.node_id THEN e.to_node_id ELSE e.from_node_id END = ANY(w.path))
-     )
-     SELECT path,depth FROM walk WHERE node_id=$2 ORDER BY depth LIMIT 1`,
-    [left, right, MAX_PATH_DEPTH],
-  );
+  const boundedPath = await findBoundedPublishedPath(left, right);
 
   const edgeCount = directRows.length + semanticRows.length;
   return {
@@ -261,10 +314,13 @@ export async function comparePublishedNodes(leftValue: unknown, rightValue: unkn
       rationaleIds: jsonArray((row as Row).rationale_ids),
       sourceIds: jsonArray((row as Row).source_ids),
     })),
-    connectingPath: pathRows[0]?.path ?? null,
+    connectingPath: boundedPath.path,
     meta: {
       bounded: true,
       storedRelationshipsOnly: true,
+      pathExpandedRows: boundedPath.expandedRows,
+      pathExpandedRowLimit: MAX_PATH_EXPANDED_ROWS,
+      pathFrontierLimit: MAX_PATH_FRONTIER,
       instrumentation: await recordObservation("compare", startedAt, {
         nodeCount: 2 + sharedRows.length,
         edgeCount,
@@ -291,7 +347,7 @@ export async function getPublishedDebate(argumentIdValue: unknown) {
      ORDER BY m.position,m.role,n.id LIMIT 200`,
     [argumentId],
   );
-  const objections = members.filter((row) => String((row as Row).kind) === "objection");
+  const objections = members.filter((row) => String((row as Row).role) === "objection");
   const steps = [];
   for (const objectionRow of objections.slice(0, 40)) {
     const objection = nodeFromRow(objectionRow as Row);
@@ -339,6 +395,7 @@ export async function getPublishedDebate(argumentIdValue: unknown) {
     meta: {
       bounded: true,
       unpublishedBranchesExcluded: true,
+      authoredObjectionRoles: true,
       instrumentation: await recordObservation("debate", startedAt, {
         nodeCount: memberNodes.length,
         edgeCount: steps.reduce((total, step) => total + step.candidateResponses.length, 0),
@@ -386,7 +443,17 @@ export async function getCoverageDashboard() {
       `SELECT COUNT(*)::int AS count FROM knowledge_arguments a
        WHERE a.published_revision_id IS NOT NULL AND (
          NOT EXISTS (SELECT 1 FROM knowledge_argument_members m WHERE m.argument_id=a.id AND m.role='premise')
-         OR NOT EXISTS (SELECT 1 FROM knowledge_argument_members m WHERE m.argument_id=a.id AND m.role IN ('conclusion','response'))
+         OR NOT EXISTS (
+           SELECT 1 FROM knowledge_nodes c
+           WHERE c.id=a.conclusion_node_id AND c.published_revision_id IS NOT NULL
+         )
+         OR (
+           EXISTS (SELECT 1 FROM knowledge_argument_members m WHERE m.argument_id=a.id AND m.role='objection')
+           AND NOT EXISTS (
+             SELECT 1 FROM knowledge_argument_members m
+             WHERE m.argument_id=a.id AND m.role IN ('response','counter_response')
+           )
+         )
        )`,
     ),
   ]);
@@ -468,7 +535,7 @@ function proposalFromRow(row: Row) {
 export async function createAuthoringProposal(value: unknown, actor: string) {
   const input = requireObject(value);
   const proposalType = requireText(input.proposalType, "proposalType", 80);
-  if (!PROPOSAL_TYPES.has(proposalType)) throw new Error("unsupported proposalType");
+  if (!PROPOSAL_TYPES.has(proposalType)) throw new KnowledgeInputError("unsupported proposalType");
   const proposalInput = input.input && typeof input.input === "object" && !Array.isArray(input.input)
     ? input.input as Record<string, unknown>
     : {};
@@ -514,22 +581,78 @@ export async function listAuthoringProposals(options: { status?: unknown; type?:
   return rows.map((row) => proposalFromRow(row as Row));
 }
 
+async function requireGovernedDraftRevisions(client: PoolClient, revisionIds: string[], proposalCreatedAt: unknown) {
+  if (revisionIds.length === 0) {
+    throw new KnowledgeInputError("accepted proposals require at least one governed mutation revision ID");
+  }
+  if (revisionIds.some((revisionId) => !revisionId.startsWith("rev:"))) {
+    throw new KnowledgeInputError("acceptedMutationIds must contain governed revision IDs");
+  }
+
+  const result = await client.query<{ revision_id: string }>(
+    `SELECT v.revision_id FROM knowledge_node_versions v
+       JOIN knowledge_nodes n ON n.id=v.node_id
+       WHERE v.revision_id=ANY($1::text[]) AND n.current_revision_id=v.revision_id
+         AND n.current_revision_id IS DISTINCT FROM n.published_revision_id AND v.created_at >= $2
+     UNION SELECT v.revision_id FROM knowledge_edge_versions v
+       JOIN knowledge_edges e ON e.id=v.edge_id
+       WHERE v.revision_id=ANY($1::text[]) AND e.current_revision_id=v.revision_id
+         AND e.current_revision_id IS DISTINCT FROM e.published_revision_id AND v.created_at >= $2
+     UNION SELECT v.revision_id FROM knowledge_source_versions v
+       JOIN knowledge_sources s ON s.id=v.source_id
+       WHERE v.revision_id=ANY($1::text[]) AND s.current_revision_id=v.revision_id
+         AND s.current_revision_id IS DISTINCT FROM s.published_revision_id AND v.created_at >= $2
+     UNION SELECT v.revision_id FROM knowledge_topic_versions v
+       JOIN knowledge_topics t ON t.id=v.topic_id
+       WHERE v.revision_id=ANY($1::text[]) AND t.current_revision_id=v.revision_id
+         AND t.current_revision_id IS DISTINCT FROM t.published_revision_id AND v.created_at >= $2
+     UNION SELECT v.revision_id FROM knowledge_path_versions v
+       JOIN knowledge_paths p ON p.id=v.path_id
+       WHERE v.revision_id=ANY($1::text[]) AND p.current_revision_id=v.revision_id
+         AND p.current_revision_id IS DISTINCT FROM p.published_revision_id AND v.created_at >= $2
+     UNION SELECT v.revision_id FROM knowledge_argument_versions v
+       JOIN knowledge_arguments a ON a.id=v.argument_id
+       WHERE v.revision_id=ANY($1::text[]) AND a.current_revision_id=v.revision_id
+         AND a.current_revision_id IS DISTINCT FROM a.published_revision_id AND v.created_at >= $2`,
+    [revisionIds, proposalCreatedAt],
+  );
+  const found = new Set(result.rows.map((row) => row.revision_id));
+  const missing = revisionIds.filter((revisionId) => !found.has(revisionId));
+  if (missing.length > 0) {
+    throw new KnowledgeConflictError(
+      "accepted proposals require current unpublished governed revisions created after the proposal"
+    );
+  }
+}
+
 export async function decideAuthoringProposal(idValue: unknown, value: unknown, actor: string) {
   const id = assertCanonicalId(idValue, "proposalId");
   const input = requireObject(value);
   const status = requireText(input.status, "status", 40);
-  if (!new Set(["accepted", "rejected", "expired"]).has(status)) throw new Error("proposal decision must be accepted, rejected, or expired");
+  if (!new Set(["accepted", "rejected", "expired"]).has(status)) {
+    throw new KnowledgeInputError("proposal decision must be accepted, rejected, or expired");
+  }
+  if (Array.isArray(input.acceptedMutationIds) && input.acceptedMutationIds.length > 100) {
+    throw new KnowledgeInputError("acceptedMutationIds exceeds 100 entries");
+  }
   const mutationIds = Array.isArray(input.acceptedMutationIds)
-    ? [...new Set(input.acceptedMutationIds.map((item) => assertCanonicalId(item, "acceptedMutationId")))].slice(0, 100)
+    ? [...new Set(input.acceptedMutationIds.map((item) => assertCanonicalId(item, "acceptedMutationId")))]
     : [];
-  if (status !== "accepted" && mutationIds.length) throw new Error("mutation IDs are only valid for accepted proposals");
+  if (status !== "accepted" && mutationIds.length) {
+    throw new KnowledgeInputError("mutation IDs are only valid for accepted proposals");
+  }
   const notes = typeof input.notes === "string" ? input.notes.trim().slice(0, 10_000) : null;
 
   return withKnowledgeTransaction(async (client) => {
     const existing = await client.query(`SELECT * FROM knowledge_authoring_proposals WHERE id=$1 FOR UPDATE`, [id]);
     const row = existing.rows[0] as Row | undefined;
     if (!row) return null;
-    if (String(row.status) !== "proposed") throw new Error("only proposed authoring assistance can be decided");
+    if (String(row.status) !== "proposed") {
+      throw new KnowledgeConflictError("only proposed authoring assistance can be decided");
+    }
+    if (status === "accepted") {
+      await requireGovernedDraftRevisions(client, mutationIds, row.created_at);
+    }
     const updated = await client.query(
       `UPDATE knowledge_authoring_proposals SET status=$2,reviewed_by=$3,review_notes=$4,
        accepted_mutation_ids=$5::jsonb,reviewed_at=NOW(),updated_at=NOW() WHERE id=$1 RETURNING *`,
