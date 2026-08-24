@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import adminRouter from "./routes/admin";
 import adminKnowledgeRouter from "./routes/adminKnowledge";
+import adminKnowledgeAdvancedRouter from "./routes/adminKnowledgeAdvanced";
 import adminKnowledgeJourneysRouter from "./routes/adminKnowledgeJourneys";
 import adminYoutubeRouter from "./routes/adminYoutube";
 import answerRouter from "./routes/answer";
@@ -12,6 +13,7 @@ import eventsRouter from "./routes/events";
 import healthRouter from "./routes/health";
 import identityRouter from "./routes/identity";
 import knowledgeRouter from "./routes/knowledge";
+import knowledgeAdvancedRouter from "./routes/knowledgeAdvanced";
 import knowledgeJourneysRouter from "./routes/knowledgeJourneys";
 import leaderboardRouter from "./routes/leaderboard";
 import registerRouter from "./routes/register";
@@ -63,11 +65,12 @@ export function createApp(): express.Application {
   app.use("/leaderboard", leaderboardRouter);
   app.use("/topics", topicsRouter);
   app.use("/releases", releasesRouter);
+  app.use("/knowledge", knowledgeAdvancedRouter);
   app.use("/knowledge", knowledgeJourneysRouter);
   app.use("/knowledge", knowledgeRouter);
-  // Mount specific admin surfaces before the generic admin controller. Journey
-  // authoring has its own namespace so its review/publish routes cannot shadow
-  // the canonical node/edge/source review and publication contracts.
+  // Mount narrow admin surfaces before the generic Knowledge Foundry router so
+  // review/publication contracts cannot be shadowed by similarly named paths.
+  app.use("/admin/knowledge/advanced", adminKnowledgeAdvancedRouter);
   app.use("/admin/knowledge/journeys", adminKnowledgeJourneysRouter);
   app.use("/admin/knowledge", adminKnowledgeRouter);
   app.use("/admin/releases", adminReleasesRouter);
@@ -88,7 +91,11 @@ export function createApp(): express.Application {
         knowledgeTopics: "GET /knowledge/topics",
         knowledgePath: "GET /knowledge/paths/:id",
         knowledgeArgument: "GET /knowledge/arguments/:id",
-        knowledgeJourneyAdmin: "POST /admin/knowledge/journeys/topics|paths|arguments",
+        knowledgeTimeline: "GET /knowledge/timeline?topicId=...&from=...&to=...",
+        knowledgeCompareAdvanced: "GET /knowledge/compare/advanced?left=...&right=...&lens=...",
+        knowledgeDebate: "GET /knowledge/debate/:argumentId",
+        knowledgeCoverageAdmin: "GET /admin/knowledge/advanced/coverage",
+        knowledgeProposalAdmin: "POST /admin/knowledge/advanced/proposals",
         accountIdentity: "POST /identity/exchange",
         state: "GET /state?roomId=...",
         events: "GET /events?roomId=...&userId=...",
