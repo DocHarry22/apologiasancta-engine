@@ -62,6 +62,7 @@ export interface KnowledgeNode {
   language?: string;
   contentState: KnowledgeContentState;
   currentRevisionId: string | null;
+  publishedRevisionId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -74,6 +75,7 @@ export interface KnowledgeEdge {
   relationshipType: KnowledgeRelationshipType;
   contentState: KnowledgeContentState;
   currentRevisionId: string | null;
+  publishedRevisionId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -89,7 +91,8 @@ export interface EdgeAssertion {
   attributionMode: string;
   confidence: string;
   reviewState: string;
-  revisionId?: string;
+  revisionId: string;
+  contentHash: string;
   metadata: Record<string, unknown>;
   createdAt: string;
 }
@@ -97,11 +100,13 @@ export interface EdgeAssertion {
 export interface KnowledgeAssessment {
   id: string;
   nodeId: string;
+  nodeRevisionId: string;
   lens: string;
   position: AssessmentPosition;
   rationaleIds: string[];
   sourceIds: string[];
   reviewState: string;
+  contentHash: string;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -119,6 +124,7 @@ export interface KnowledgeSource {
   licensingStatus?: string;
   contentState: KnowledgeContentState;
   currentRevisionId: string | null;
+  publishedRevisionId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -128,12 +134,14 @@ export interface KnowledgeCitation {
   id: string;
   sourceId: string;
   nodeId?: string;
+  nodeRevisionId?: string;
   edgeAssertionId?: string;
   locator: string;
   fragment?: string;
   fragmentMode: string;
   attributionMode: string;
   reviewState: string;
+  contentHash: string;
   metadata: Record<string, unknown>;
   createdAt: string;
 }
