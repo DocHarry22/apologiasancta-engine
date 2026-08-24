@@ -9,7 +9,7 @@ import {
   validateNodeInput,
 } from "./knowledge/validation";
 
-const repositorySource = readFileSync(new URL("./knowledge/repository.ts", import.meta.url), "utf8");
+const repositorySource = readFileSync("src/knowledge/repository.ts", "utf8");
 
 test("published remains a known stored state but is rejected from ordinary authoring payloads", () => {
   assert.equal(parseContentState("published"), "published");
@@ -72,7 +72,7 @@ test("database publication guard requires evidence-backed edge assertions", () =
     "s.published_revision_id IS NOT NULL",
     "approved attributable assertion with published source evidence and an approved citation",
   ]) {
-    assert.match(KNOWLEDGE_SCHEMA_HARDENING_SQL, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.ok(KNOWLEDGE_SCHEMA_HARDENING_SQL.includes(required), `missing hardening clause: ${required}`);
   }
 });
 
