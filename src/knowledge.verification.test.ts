@@ -52,8 +52,8 @@ test("publication and assessment states use explicit bounded vocabularies", () =
   assert.throws(() => parseContentState("truthy"), /unsupported content state/);
 });
 
-test("schema v2 separates current authoring revisions from immutable published revisions", () => {
-  assert.equal(KNOWLEDGE_SCHEMA_VERSION, 2);
+test("schema v3 separates current authoring revisions from immutable published revisions and adds curated journeys", () => {
+  assert.equal(KNOWLEDGE_SCHEMA_VERSION, 3);
   for (const required of [
     "published_revision_id",
     "node_revision_id",
@@ -61,6 +61,17 @@ test("schema v2 separates current authoring revisions from immutable published r
     "uq_knowledge_assessment_revision_lens",
     "idx_knowledge_nodes_published_revision",
     "idx_knowledge_edges_published_revision",
+    "knowledge_topics",
+    "knowledge_topic_versions",
+    "knowledge_topic_nodes",
+    "knowledge_paths",
+    "knowledge_path_versions",
+    "knowledge_path_nodes",
+    "knowledge_arguments",
+    "knowledge_argument_versions",
+    "knowledge_argument_members",
+    "idx_knowledge_path_nodes_path",
+    "idx_knowledge_argument_members_argument",
   ]) {
     assert.match(KNOWLEDGE_SCHEMA_SQL, new RegExp(required));
   }
