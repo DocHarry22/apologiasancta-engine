@@ -65,8 +65,10 @@ export function createApp(): express.Application {
   app.use("/releases", releasesRouter);
   app.use("/knowledge", knowledgeJourneysRouter);
   app.use("/knowledge", knowledgeRouter);
-  // Mount specific admin surfaces before the generic admin controller.
-  app.use("/admin/knowledge", adminKnowledgeJourneysRouter);
+  // Mount specific admin surfaces before the generic admin controller. Journey
+  // authoring has its own namespace so its review/publish routes cannot shadow
+  // the canonical node/edge/source review and publication contracts.
+  app.use("/admin/knowledge/journeys", adminKnowledgeJourneysRouter);
   app.use("/admin/knowledge", adminKnowledgeRouter);
   app.use("/admin/releases", adminReleasesRouter);
   app.use("/admin/youtube", adminYoutubeRouter);
@@ -86,6 +88,7 @@ export function createApp(): express.Application {
         knowledgeTopics: "GET /knowledge/topics",
         knowledgePath: "GET /knowledge/paths/:id",
         knowledgeArgument: "GET /knowledge/arguments/:id",
+        knowledgeJourneyAdmin: "POST /admin/knowledge/journeys/topics|paths|arguments",
         accountIdentity: "POST /identity/exchange",
         state: "GET /state?roomId=...",
         events: "GET /events?roomId=...&userId=...",
