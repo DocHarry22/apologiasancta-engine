@@ -51,7 +51,7 @@ router.post("/proposals/:id/decision", asyncRoute(async (req, res) => {
   }
   res.json({
     proposal,
-    publicationBoundary: "Accepted proposal mutation IDs remain subject to ordinary review and publishRevision gates.",
+    publicationBoundary: "Accepted proposals must reference current unpublished governed revisions; those revisions still require ordinary review and publication gates.",
   });
 }));
 
