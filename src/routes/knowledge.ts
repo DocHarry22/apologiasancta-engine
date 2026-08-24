@@ -6,6 +6,7 @@ import {
   getNode,
   getNodeAssessments,
   getNodeEvidence,
+  getSource,
   searchKnowledge,
 } from "../knowledge/repository";
 
@@ -64,6 +65,11 @@ router.get("/nodes/:id/evidence", asyncRoute(async (req, res) => {
 }));
 
 router.get("/nodes/:id/assessments", asyncRoute(async (req, res) => {
+  const node = await getNode(req.params.id);
+  if (!node) {
+    res.status(404).json({ error: "Knowledge node not found" });
+    return;
+  }
   const assessments = await getNodeAssessments(req.params.id, req.query.lens);
   res.json({ nodeId: req.params.id, assessments });
 }));
@@ -75,6 +81,15 @@ router.get("/nodes/:id", asyncRoute(async (req, res) => {
     return;
   }
   res.json(node);
+}));
+
+router.get("/sources/:id", asyncRoute(async (req, res) => {
+  const source = await getSource(req.params.id);
+  if (!source) {
+    res.status(404).json({ error: "Knowledge source not found" });
+    return;
+  }
+  res.json(source);
 }));
 
 router.get("/compare", asyncRoute(async (req, res) => {
