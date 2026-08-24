@@ -3,6 +3,7 @@ import type { KnowledgeEdge } from "./types";
 import { assertCanonicalId } from "./validation";
 
 type Row = Record<string, unknown>;
+const MAX_EXISTENCE_BATCH = 1000;
 
 function iso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
@@ -13,6 +14,14 @@ function jsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+export function validateCanonicalIdBatch(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  if (values.length > MAX_EXISTENCE_BATCH) {
+    throw new Error(`ids exceeds ${MAX_EXISTENCE_BATCH} entries`);
+  }
+  return [...new Set(values.map((value) => assertCanonicalId(value, "id")))];
 }
 
 export async function getEdgeForAuthoring(idValue: unknown): Promise<KnowledgeEdge | null> {
@@ -42,8 +51,7 @@ export async function getEdgeForAuthoring(idValue: unknown): Promise<KnowledgeEd
 }
 
 export async function getExistingCanonicalIds(values: unknown): Promise<Set<string>> {
-  if (!Array.isArray(values)) return new Set();
-  const ids = [...new Set(values.map((value) => assertCanonicalId(value, "id")))].slice(0, 1000);
+  const ids = validateCanonicalIdBatch(values);
   if (ids.length === 0) return new Set();
   const [nodeRows, edgeRows, sourceRows] = await Promise.all([
     queryKnowledge<{ id: string }>(`SELECT id FROM knowledge_nodes WHERE id=ANY($1::text[])`, [ids]),
