@@ -41,6 +41,11 @@ import {
   stopCanonicalContentRefreshLoop,
 } from "./content/canonical";
 import { assertProductionAdminToken } from "./security/adminToken";
+import {
+  closeKnowledgeDatabase,
+  ensureKnowledgeSchema,
+  getKnowledgeEngineStatus,
+} from "./knowledge/db";
 
 const port = Number(process.env.PORT ?? 4000);
 const host = "0.0.0.0";
@@ -80,6 +85,14 @@ configureStatePersistence({
 const app = createApp();
 
 async function main() {
+  // Identity/provenance is a startup dependency when KNOWLEDGE_ENGINE_REQUIRED is true.
+  // In local/offline development the subsystem may remain unconfigured and reports that state explicitly.
+  await ensureKnowledgeSchema();
+  const knowledgeStatus = getKnowledgeEngineStatus();
+  if (knowledgeStatus.required && !knowledgeStatus.ready) {
+    throw new Error(knowledgeStatus.lastError || "Knowledge Engine is required but unavailable");
+  }
+
   const canonicalConfig = getCanonicalContentConfig();
   const githubConfig = getGitHubSyncConfig();
   if (canonicalConfig) {
@@ -149,6 +162,13 @@ async function main() {
       console.error("[Shutdown] Failed to flush runtime state:", error);
     }
 
+    try {
+      await closeKnowledgeDatabase();
+      console.log("[Shutdown] Knowledge database closed");
+    } catch (error) {
+      console.error("[Shutdown] Failed to close knowledge database:", error);
+    }
+
     if (!server) {
       process.exit(0);
       return;
@@ -181,6 +201,7 @@ async function main() {
   server = app.listen(port, host, () => {
     const ytConfigured = process.env.YOUTUBE_API_KEY ? "✓" : "✗";
     const contentConfigured = getCanonicalContentConfig() || getGitHubSyncConfig() ? "✓" : "✗";
+    const currentKnowledgeStatus = getKnowledgeEngineStatus();
     const scoringMode = getScoringMode();
     console.log(`
 ╔═══════════════════════════════════════════════════════╗
@@ -192,6 +213,7 @@ async function main() {
 ║    GET  /state     - Current quiz state               ║
 ║    GET  /events    - SSE stream                       ║
 ║    GET  /topics    - Public content (from GitHub)     ║
+║    GET  /knowledge - Canonical Knowledge Engine       ║
 ║    POST /answer    - Submit answer                    ║
 ║    POST /admin/*   - Admin controls                   ║
 ║    POST /admin/youtube/* - YouTube chat (${ytConfigured} API key)     ║
@@ -204,6 +226,10 @@ async function main() {
   `);
     console.log(`[Config] Allowed origins: ${allowedOrigins.join(", ")}`);
     console.log(`[Config] Runtime persistence: ${getPersistenceStatus().driver} @ ${getStatePersistencePath()}`);
+    console.log(
+      `[Config] Knowledge Engine: ${currentKnowledgeStatus.ready ? "ready" : "disabled/unavailable"} `
+      + `(schema ${currentKnowledgeStatus.schemaVersion ?? "n/a"})`
+    );
     console.log("[Config] Use POST /admin/persistence/save to force a runtime snapshot");
     console.log(
       periodicContentRefresh
@@ -215,7 +241,6 @@ async function main() {
         ? `[Config] Automatic quiz runtime active for: ${automaticRooms.join(", ")}`
         : "[Config] Use POST /admin/start to begin the quiz"
     );
-
   });
 }
 
