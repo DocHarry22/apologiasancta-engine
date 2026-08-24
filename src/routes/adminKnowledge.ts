@@ -9,10 +9,16 @@ import {
   createSource,
   getNeighborhood,
   getNode,
+  getNodeAssessments,
+  getNodeEvidence,
+  getSource,
   publishRevision,
   reconciliationSuggestions,
   recordReview,
+  reviseEdge,
   reviseNode,
+  reviseSource,
+  searchKnowledge,
   upsertAssessment,
 } from "../knowledge/repository";
 
@@ -45,6 +51,11 @@ router.post("/edges", asyncRoute(async (req, res) => {
   res.status(201).json(edge);
 }));
 
+router.patch("/edges/:id", asyncRoute(async (req, res) => {
+  const edge = await reviseEdge(req.params.id, req.body, actor(req));
+  res.json(edge);
+}));
+
 router.post("/edge-assertions", asyncRoute(async (req, res) => {
   const assertion = await createEdgeAssertion(req.body);
   res.status(201).json(assertion);
@@ -53,6 +64,11 @@ router.post("/edge-assertions", asyncRoute(async (req, res) => {
 router.post("/sources", asyncRoute(async (req, res) => {
   const source = await createSource(req.body, actor(req));
   res.status(201).json(source);
+}));
+
+router.patch("/sources/:id", asyncRoute(async (req, res) => {
+  const source = await reviseSource(req.params.id, req.body, actor(req));
+  res.json(source);
 }));
 
 router.post("/citations", asyncRoute(async (req, res) => {
@@ -70,6 +86,19 @@ router.put("/claim-families/member", asyncRoute(async (req, res) => {
   res.status(204).end();
 }));
 
+router.get("/search", asyncRoute(async (req, res) => {
+  if (typeof req.query.q !== "string" || !req.query.q.trim()) {
+    res.status(400).json({ error: "q is required" });
+    return;
+  }
+  const results = await searchKnowledge(req.query.q, {
+    kind: typeof req.query.kind === "string" ? req.query.kind : undefined,
+    includeUnpublished: true,
+    limit: Number.parseInt(String(req.query.limit ?? "50"), 10) || 50,
+  });
+  res.json({ results });
+}));
+
 router.get("/reconcile", asyncRoute(async (req, res) => {
   if (typeof req.query.q !== "string" || !req.query.q.trim()) {
     res.status(400).json({ error: "q is required" });
@@ -79,6 +108,20 @@ router.get("/reconcile", asyncRoute(async (req, res) => {
   res.json({ suggestions, advisory: "Similarity suggestions never merge records automatically." });
 }));
 
+router.get("/nodes/:id/evidence", asyncRoute(async (req, res) => {
+  const payload = await getNodeEvidence(req.params.id, true);
+  if (!payload) {
+    res.status(404).json({ error: "Knowledge node not found" });
+    return;
+  }
+  res.json(payload);
+}));
+
+router.get("/nodes/:id/assessments", asyncRoute(async (req, res) => {
+  const assessments = await getNodeAssessments(req.params.id, req.query.lens, true);
+  res.json({ nodeId: req.params.id, assessments });
+}));
+
 router.get("/nodes/:id", asyncRoute(async (req, res) => {
   const node = await getNode(req.params.id, true);
   if (!node) {
@@ -86,6 +129,15 @@ router.get("/nodes/:id", asyncRoute(async (req, res) => {
     return;
   }
   res.json(node);
+}));
+
+router.get("/sources/:id", asyncRoute(async (req, res) => {
+  const source = await getSource(req.params.id, true);
+  if (!source) {
+    res.status(404).json({ error: "Knowledge source not found" });
+    return;
+  }
+  res.json(source);
 }));
 
 router.get("/neighborhood", asyncRoute(async (req, res) => {
