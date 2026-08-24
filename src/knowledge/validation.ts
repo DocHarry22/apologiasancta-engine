@@ -13,22 +13,34 @@ import {
 const ID_PATTERN = /^[a-z][a-z0-9_-]*:[a-z0-9][a-z0-9._:-]*$/;
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
+export class KnowledgeInputError extends Error {
+  readonly statusCode = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = "KnowledgeInputError";
+  }
+}
+
+function invalid(message: string): never {
+  throw new KnowledgeInputError(message);
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("payload must be an object");
+    invalid("payload must be an object");
   }
   return value as Record<string, unknown>;
 }
 
 function boundedText(value: unknown, field: string, maximum: number, required = true): string | undefined {
   if (value === undefined || value === null || value === "") {
-    if (required) throw new Error(`${field} is required`);
+    if (required) invalid(`${field} is required`);
     return undefined;
   }
-  if (typeof value !== "string") throw new Error(`${field} must be a string`);
+  if (typeof value !== "string") invalid(`${field} must be a string`);
   const normalized = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
-  if (!normalized && required) throw new Error(`${field} is required`);
-  if (normalized.length > maximum) throw new Error(`${field} exceeds ${maximum} characters`);
+  if (!normalized && required) invalid(`${field} is required`);
+  if (normalized.length > maximum) invalid(`${field} exceeds ${maximum} characters`);
   return normalized || undefined;
 }
 
@@ -39,8 +51,8 @@ export function asMetadata(value: unknown): Record<string, unknown> {
 
 export function asStringArray(value: unknown, field: string, maximum = 50): string[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
-  if (value.length > maximum) throw new Error(`${field} exceeds ${maximum} entries`);
+  if (!Array.isArray(value)) invalid(`${field} must be an array`);
+  if (value.length > maximum) invalid(`${field} exceeds ${maximum} entries`);
   return value.map((entry, index) => boundedText(entry, `${field}[${index}]`, 250) as string);
 }
 
@@ -61,38 +73,38 @@ export function canonicalId(kind: string, slug: string): string {
 
 export function assertCanonicalId(value: unknown, field = "id"): string {
   const text = boundedText(value, field, 200) as string;
-  if (!ID_PATTERN.test(text)) throw new Error(`${field} must be a stable canonical id such as claim:john-1-1`);
+  if (!ID_PATTERN.test(text)) invalid(`${field} must be a stable canonical id such as claim:john-1-1`);
   return text;
 }
 
 export function assertSlug(value: unknown, field = "canonicalSlug"): string {
   const text = boundedText(value, field, 160) as string;
-  if (!SLUG_PATTERN.test(text)) throw new Error(`${field} must contain lowercase letters, numbers, dots, underscores, or hyphens`);
+  if (!SLUG_PATTERN.test(text)) invalid(`${field} must contain lowercase letters, numbers, dots, underscores, or hyphens`);
   return text;
 }
 
 export function parseNodeKind(value: unknown): KnowledgeNodeKind {
   const text = boundedText(value, "kind", 80) as string;
-  if (!(NODE_KINDS as readonly string[]).includes(text)) throw new Error(`unsupported node kind: ${text}`);
+  if (!(NODE_KINDS as readonly string[]).includes(text)) invalid(`unsupported node kind: ${text}`);
   return text as KnowledgeNodeKind;
 }
 
 export function parseRelationshipType(value: unknown): KnowledgeRelationshipType {
   const text = boundedText(value, "relationshipType", 100) as string;
-  if (!(RELATIONSHIP_TYPES as readonly string[]).includes(text)) throw new Error(`unsupported relationship type: ${text}`);
+  if (!(RELATIONSHIP_TYPES as readonly string[]).includes(text)) invalid(`unsupported relationship type: ${text}`);
   return text as KnowledgeRelationshipType;
 }
 
 export function parseContentState(value: unknown, fallback: KnowledgeContentState = "draft"): KnowledgeContentState {
   if (value === undefined || value === null || value === "") return fallback;
   const text = boundedText(value, "contentState", 40) as string;
-  if (!(CONTENT_STATES as readonly string[]).includes(text)) throw new Error(`unsupported content state: ${text}`);
+  if (!(CONTENT_STATES as readonly string[]).includes(text)) invalid(`unsupported content state: ${text}`);
   return text as KnowledgeContentState;
 }
 
 export function parseAssessmentPosition(value: unknown): AssessmentPosition {
   const text = boundedText(value, "position", 40) as string;
-  if (!(ASSESSMENT_POSITIONS as readonly string[]).includes(text)) throw new Error(`unsupported assessment position: ${text}`);
+  if (!(ASSESSMENT_POSITIONS as readonly string[]).includes(text)) invalid(`unsupported assessment position: ${text}`);
   return text as AssessmentPosition;
 }
 
@@ -119,7 +131,7 @@ export function validateNodeInput(value: unknown): ValidatedNodeInput {
   const id = input.id ? assertCanonicalId(input.id) : canonicalId(kind, canonicalSlug);
   const proposition = boundedText(input.proposition, "proposition", 10_000, false);
   if (["claim", "objection", "response", "conclusion"].includes(kind) && !proposition) {
-    throw new Error(`${kind} nodes require a proposition`);
+    invalid(`${kind} nodes require a proposition`);
   }
   const summary = boundedText(input.summary, "summary", 20_000, false);
   const language = boundedText(input.language, "language", 40, false);
@@ -150,7 +162,7 @@ export function validateEdgeInput(value: unknown): ValidatedEdgeInput {
   const input = record(value);
   const fromNodeId = assertCanonicalId(input.fromNodeId, "fromNodeId");
   const toNodeId = assertCanonicalId(input.toNodeId, "toNodeId");
-  if (fromNodeId === toNodeId) throw new Error("an edge cannot connect a node to itself");
+  if (fromNodeId === toNodeId) invalid("an edge cannot connect a node to itself");
   const relationshipType = parseRelationshipType(input.relationshipType);
   const id = input.id
     ? assertCanonicalId(input.id)
