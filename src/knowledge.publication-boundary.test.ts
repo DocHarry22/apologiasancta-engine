@@ -10,6 +10,7 @@ import {
 } from "./knowledge/validation";
 
 const repositorySource = readFileSync("src/knowledge/repository.ts", "utf8");
+const publicRouteSource = readFileSync("src/routes/knowledge.ts", "utf8");
 
 test("published remains a known stored state but is rejected from ordinary authoring payloads", () => {
   assert.equal(parseContentState("published"), "published");
@@ -61,6 +62,10 @@ test("public assessment reads require the published node revision and approved a
   assert.match(repositorySource, /const node = await getNode\(idValue, includeUnpublished\)/);
   assert.match(repositorySource, /includeUnpublished \? node\.currentRevisionId : node\.publishedRevisionId/);
   assert.match(repositorySource, /includeUnpublished \? "" : "AND review_state='approved'"/);
+  assert.match(
+    publicRouteSource,
+    /router\.get\("\/nodes\/:id\/assessments"[\s\S]*const node = await getNode\(req\.params\.id\)[\s\S]*getNodeAssessments\(req\.params\.id, req\.query\.lens\)/
+  );
 });
 
 test("database publication guard requires evidence-backed edge assertions", () => {
