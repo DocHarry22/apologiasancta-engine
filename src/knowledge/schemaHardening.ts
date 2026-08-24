@@ -18,13 +18,34 @@ BEGIN
   END IF;
 
   SELECT COUNT(*) INTO assertion_count
-  FROM knowledge_edge_assertions
-  WHERE edge_id = NEW.id
-    AND revision_id = NEW.published_revision_id
-    AND review_state = 'approved';
+  FROM knowledge_edge_assertions a
+  WHERE a.edge_id = NEW.id
+    AND a.revision_id = NEW.published_revision_id
+    AND a.review_state = 'approved'
+    AND jsonb_typeof(a.source_ids) = 'array'
+    AND jsonb_array_length(a.source_ids) > 0
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements_text(a.source_ids) source_ref(source_id)
+      LEFT JOIN knowledge_sources s ON s.id = source_ref.source_id
+      WHERE s.published_revision_id IS NULL
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM knowledge_citations c
+      JOIN knowledge_sources s ON s.id = c.source_id
+      WHERE c.edge_assertion_id = a.id
+        AND c.review_state = 'approved'
+        AND s.published_revision_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(a.source_ids) source_ref(source_id)
+          WHERE source_ref.source_id = c.source_id
+        )
+    );
 
   IF assertion_count < 1 THEN
-    RAISE EXCEPTION 'knowledge edge publication requires an approved assertion for the published revision';
+    RAISE EXCEPTION 'knowledge edge publication requires an approved assertion for the published revision; specifically an approved attributable assertion with published source evidence and an approved citation for this revision';
   END IF;
 
   RETURN NEW;
