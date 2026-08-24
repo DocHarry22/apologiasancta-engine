@@ -369,7 +369,7 @@ export async function reviseArgument(idValue: unknown, value: unknown, actor: st
   });
 }
 
-async function getJourney(targetType: JourneyTargetType, idValue: unknown, includeUnpublished = false) {
+async function getJourney(targetType: JourneyTargetType, idValue: unknown, includeUnpublished = false): Promise<Row | null> {
   const id = assertCanonicalId(idValue, "id");
   const config = CONFIG[targetType];
   const rows = await queryKnowledge(
