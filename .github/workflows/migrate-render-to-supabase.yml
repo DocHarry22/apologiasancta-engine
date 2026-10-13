@@ -2,6 +2,12 @@ name: Migrate Knowledge data to Supabase
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run safe preflight checks only (no records copied)"
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -28,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify migration script syntax
+        run: node --check scripts/migrate-knowledge-to-supabase.mjs
+
       - name: Validate migration inputs
         env:
           SOURCE_DATABASE_URL: ${{ secrets.SOURCE_DATABASE_URL }}
@@ -36,9 +45,10 @@ jobs:
           test -n "$SOURCE_DATABASE_URL"
           test -n "$SUPABASE_DATABASE_URL"
 
-      - name: Migrate Knowledge data
+      - name: Preflight or migrate Knowledge data
         env:
           SOURCE_DATABASE_URL: ${{ secrets.SOURCE_DATABASE_URL }}
           SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
           REQUIRE_EMPTY_TARGET: "true"
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
         run: node scripts/migrate-knowledge-to-supabase.mjs
