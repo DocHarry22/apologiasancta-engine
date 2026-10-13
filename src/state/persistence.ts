@@ -272,8 +272,10 @@ export function getPersistenceStatus(): PersistenceStatus {
  * any learner/competition state or requiring a pre-existing snapshot row.
  */
 export async function probePersistenceReadiness(): Promise<boolean> {
-  if (!persistenceConfig) return false;
+  // Local file/SQLite mode has no remote database to probe. Production
+  // PostgreSQL mode must have an installed snapshot handler and a live pool.
   if (getResolvedPersistenceDriver() !== "postgres") return true;
+  if (!persistenceConfig) return false;
 
   try {
     const pool = await getPostgresPool();
