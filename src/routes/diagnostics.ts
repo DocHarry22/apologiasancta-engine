@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { allowedOrigins } from "../config/cors";
-import { getPersistenceStatus } from "../state/persistence";
+import { getPersistenceStatus, probePersistenceReadiness } from "../state/persistence";
 import { isJoinTokenConfigured } from "../security/joinToken";
 import { isAccountIdentityConfigured, isAccountIdentityEnabled } from "../security/accountIdentity";
 import { isQuizAutoStartEnabled, isQuizContinuousEnabled } from "../config/quizRuntime";
@@ -9,9 +9,10 @@ import { isAdminTokenConfigured } from "../security/adminToken";
 
 const router = Router();
 
-router.get("/", (_req, res) => {
+router.get("/", async (_req, res) => {
   const persistence = getPersistenceStatus();
   const canonicalContent = getCanonicalContentStatus();
+  const persistenceReady = await probePersistenceReadiness();
   res.json({
     ok: true,
     service: "apologiasancta-engine",
@@ -25,7 +26,8 @@ router.get("/", (_req, res) => {
       accountIdentityExchange: !isAccountIdentityEnabled() || isAccountIdentityConfigured(),
       quizAutoStart: isQuizAutoStartEnabled(),
       quizContinuous: isQuizContinuousEnabled(),
-      persistence: persistence.configured,
+      persistence: persistenceReady,
+      persistenceConfigured: persistence.configured,
       persistenceDriver: persistence.driver,
       corsOriginCount: allowedOrigins.length,
       githubContentSync: Boolean((process.env.GITHUB_CONTENT_OWNER ?? process.env.GITHUB_OWNER)?.trim()),
