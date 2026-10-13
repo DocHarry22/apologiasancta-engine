@@ -266,6 +266,30 @@ export function getPersistenceStatus(): PersistenceStatus {
   };
 }
 
+/**
+ * An initialized snapshot callback does not prove the database is reachable.
+ * Probe the configured PostgreSQL backend for health checks without writing
+ * any learner/competition state or requiring a pre-existing snapshot row.
+ */
+export async function probePersistenceReadiness(): Promise<boolean> {
+  // Local file/SQLite mode has no remote database to probe. Production
+  // PostgreSQL mode must have an installed snapshot handler and a live pool.
+  if (getResolvedPersistenceDriver() !== "postgres") return true;
+  if (!persistenceConfig) return false;
+
+  try {
+    const pool = await getPostgresPool();
+    await pool.query("SELECT 1 AS ready");
+    return true;
+  } catch (error) {
+    console.error(
+      "[Persistence] PostgreSQL readiness check failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return false;
+  }
+}
+
 export function schedulePersistence(): void {
   if (!persistenceConfig || isHydrating) {
     return;
