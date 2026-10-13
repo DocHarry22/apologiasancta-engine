@@ -171,7 +171,7 @@ npm start
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Service health, room counts, and persistence status |
+| `/health` | GET | Live service readiness (503 if PostgreSQL is unreachable or required canonical content is unavailable), room counts, and persistence state |
 | `/diagnostics` | GET | Non-secret deployment readiness and version metadata |
 | `/state` | GET | Shared live state |
 | `/state/:roomId` | GET | Room-scoped live state |
@@ -323,3 +323,11 @@ src/
 ## License
 
 ISC
+
+### Database readiness and durability
+
+A configured persistence snapshot callback is **not** proof that the PostgreSQL connection works.
+`GET /health` actively checks PostgreSQL with a read-only `SELECT 1` and returns HTTP **503** while it is unreachable; a newly provisioned empty database can be ready before its first snapshot.
+The response contains `persistence.configured` (the snapshot callback is attached) and `persistence.ready` (backend reachability) separately. `GET /diagnostics` reports `readiness.persistence` based on the same probe, while `readiness.persistenceConfigured` retains the static configuration signal.
+
+When diagnosing a 503, verify the deployed database hostname, DNS, credentials, network permissions, and migration status without copying secrets into logs or tickets. Do **not** switch production silently to ephemeral local files to force a green health check. HTTP readiness indicates a reachable storage backend; it does not replace restart/recovery tests or guarantee that a previous snapshot exists.
