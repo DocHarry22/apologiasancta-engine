@@ -749,3 +749,70 @@ test("production CORS excludes localhost unless it is explicitly enabled", () =>
   const optedIn = resolveAllowedOrigins({ NODE_ENV: "production", ALLOW_LOCAL_ORIGINS: "true" });
   assert.equal(optedIn.includes("http://localhost:3000"), true);
 });
+
+test("PostgreSQL outage returns unhealthy even when persistence is configured", async () => {
+  configurePersistenceForTests("unused", "postgres");
+  setStatePersistenceDatabaseUrlForTests("postgresql://unreachable.invalid/runtime");
+  setPostgresPoolFactoryForTests(async () => ({
+    query: async () => { throw new Error("simulated database outage"); },
+    end: async () => undefined,
+  }));
+
+  const server = await startTestServer();
+  try {
+    const response = await fetch(`${server.baseUrl}/health`);
+    assert.equal(response.status, 503);
+    const health = await response.json() as {
+      ok: boolean;
+      persistence: { configured: boolean; ready: boolean; driver: string };
+    };
+    assert.equal(health.ok, false);
+    assert.equal(health.persistence.configured, true);
+    assert.equal(health.persistence.driver, "postgres");
+    assert.equal(health.persistence.ready, false);
+
+    const diagnostics = await fetch(`${server.baseUrl}/diagnostics`);
+    assert.equal(diagnostics.status, 200);
+    const body = await diagnostics.json() as {
+      readiness: { persistence: boolean; persistenceConfigured: boolean };
+    };
+    assert.equal(body.readiness.persistenceConfigured, true);
+    assert.equal(body.readiness.persistence, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("reachable empty PostgreSQL is ready without a prior snapshot", async () => {
+  configurePersistenceForTests("unused", "postgres");
+  setStatePersistenceDatabaseUrlForTests("postgresql://test.invalid/runtime");
+  let probeCount = 0;
+  setPostgresPoolFactoryForTests(async () => ({
+    query: async (sql) => {
+      if (sql.includes("SELECT 1 AS ready")) probeCount += 1;
+      return { rows: [{ ready: 1 }] };
+    },
+    end: async () => undefined,
+  }));
+
+  const server = await startTestServer();
+  try {
+    const response = await fetch(`${server.baseUrl}/health`);
+    assert.equal(response.status, 200);
+    const health = await response.json() as {
+      ok: boolean;
+      persistence: { configured: boolean; ready: boolean; lastRestoreSucceeded: boolean };
+    };
+    assert.equal(health.ok, true);
+    assert.equal(health.persistence.ready, true);
+    assert.equal(health.persistence.lastRestoreSucceeded, false);
+
+    const diagnostics = await fetch(`${server.baseUrl}/diagnostics`);
+    assert.equal(diagnostics.status, 200);
+    const body = await diagnostics.json() as { readiness: { persistence: boolean } };
+    assert.equal(body.readiness.persistence, true);
+    assert.equal(probeCount, 2);
+  } finally {
+    await server.close();
+  }
+});
