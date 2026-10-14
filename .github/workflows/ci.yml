@@ -23,6 +23,9 @@ jobs:
         # Keep CI aligned with Render's production-environment install.
         run: npm ci --include=dev
 
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=moderate
+
       - name: Typecheck
         run: npx tsc --noEmit
 
