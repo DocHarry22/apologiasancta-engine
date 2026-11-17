@@ -61,3 +61,14 @@ test("GitHub CI mirrors the production dependency install", async () => {
   assert.match(workflow, /run:\s*npm ci --include=dev/);
   assert.match(npmConfiguration, /^include=dev$/m);
 });
+
+test("request parsing dependencies retain the audited decompression and query-string fixes", async () => {
+  const lockfile = JSON.parse(
+    await readFile(resolve(repositoryRoot, "package-lock.json"), "utf8")
+  ) as {
+    packages?: Record<string, { version?: string }>;
+  };
+
+  assert.equal(lockfile.packages?.["node_modules/body-parser"]?.version, "2.4.0");
+  assert.equal(lockfile.packages?.["node_modules/qs"]?.version, "6.17.1");
+});
