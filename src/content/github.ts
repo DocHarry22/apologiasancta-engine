@@ -135,6 +135,10 @@ export interface GitHubSyncResult {
   errors: string[];
 }
 
+export interface GitHubSyncOptions {
+  concurrency?: number;
+}
+
 interface GitHubQuestion {
   id: string;
   topicId: string;
@@ -148,6 +152,29 @@ interface GitHubQuestion {
     refs: string[];
   };
   tags: string[];
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await operation(values[index], index);
+      }
+    }
+  );
+
+  await Promise.all(workers);
+  return results;
 }
 
 /**
@@ -191,11 +218,15 @@ function convertQuestion(value: unknown): UIQuestion {
  */
 export async function syncCatalogFromSource(
   source: GitHubContentSource,
-  contentPath: string
+  contentPath: string,
+  options: GitHubSyncOptions = {}
 ): Promise<GitHubSyncResult> {
   const errors: string[] = [];
   const candidateQuestions: UIQuestion[] = [];
   const candidateIds = new Set<string>();
+  const concurrency = normalizeSyncConcurrency(
+    options.concurrency ?? resolveSyncConcurrency()
+  );
 
   console.log("[github] Starting sync from GitHub...");
 
@@ -219,52 +250,71 @@ export async function syncCatalogFromSource(
       `[github] Topics: index=${indexedTopicIds.length}, discovered=${discoveredTopicIds.length}, merged=${topicIds.length}`
     );
 
-    // Fetch questions for each topic
-    for (const topicId of topicIds) {
+    // Directory and file reads are bounded-concurrent so a normal catalogue
+    // does not exhaust the overall sync deadline merely because it has many
+    // independent GitHub objects. Results are retained in source order and
+    // validated sequentially below, keeping duplicate handling deterministic.
+    const topicListings = await mapWithConcurrency(topicIds, concurrency, async (topicId) => {
       try {
         console.log(`[github] Loading topic: ${topicId}`);
 
-        // List question files in the topic's questions directory
         const questionFiles = await source.listDirectory(`${contentPath}/${topicId}/questions`, "file");
-        const jsonFiles = questionFiles.filter((f) => f.endsWith(".json"));
+        const jsonFiles = questionFiles.filter((f) => f.endsWith(".json")).sort();
 
         console.log(`[github] Found ${jsonFiles.length} question files in ${topicId}`);
-
-        // Fetch each question
-        const questions: UIQuestion[] = [];
-        for (const file of jsonFiles) {
-          try {
-            const rawQuestion = await source.fetchJson<unknown>(
-              `${contentPath}/${topicId}/questions/${file}`
-            );
-            const question = convertQuestion(rawQuestion);
-            const validation = validateQuestion(question);
-            if (!validation.valid) {
-              throw new Error(validation.errors.join("; "));
-            }
-            if (candidateIds.has(question.id)) {
-              throw new Error(`Duplicate question id: ${question.id}`);
-            }
-            candidateIds.add(question.id);
-            questions.push(question);
-          } catch (err) {
-            const msg = `Failed to fetch ${topicId}/${file}: ${err}`;
-            console.error(`[github] ${msg}`);
-            errors.push(msg);
-          }
-        }
-
-        // Stage questions only. The live catalog remains untouched until every
-        // fetch and validation has succeeded.
-        if (questions.length > 0) {
-          candidateQuestions.push(...questions);
-          console.log(`[github] Staged ${questions.length} questions for ${topicId}`);
-        }
+        return { topicId, jsonFiles };
       } catch (err) {
         const msg = `Failed to load topic ${topicId}: ${err}`;
         console.error(`[github] ${msg}`);
         errors.push(msg);
+        return { topicId, jsonFiles: [] };
       }
+    });
+
+    const questionFiles = topicListings.flatMap(({ topicId, jsonFiles }) =>
+      jsonFiles.map((file) => ({ topicId, file }))
+    );
+    const loadedQuestions = await mapWithConcurrency(
+      questionFiles,
+      concurrency,
+      async ({ topicId, file }) => {
+        try {
+          const rawQuestion = await source.fetchJson<unknown>(
+            `${contentPath}/${topicId}/questions/${file}`
+          );
+          const question = convertQuestion(rawQuestion);
+          const validation = validateQuestion(question);
+          if (!validation.valid) {
+            throw new Error(validation.errors.join("; "));
+          }
+          return { topicId, file, question };
+        } catch (error) {
+          return { topicId, file, error };
+        }
+      }
+    );
+
+    const stagedByTopic = new Map<string, number>();
+    for (const loaded of loadedQuestions) {
+      if ("error" in loaded) {
+        const msg = `Failed to fetch ${loaded.topicId}/${loaded.file}: ${loaded.error}`;
+        console.error(`[github] ${msg}`);
+        errors.push(msg);
+        continue;
+      }
+      if (candidateIds.has(loaded.question.id)) {
+        const msg = `Failed to fetch ${loaded.topicId}/${loaded.file}: Error: Duplicate question id: ${loaded.question.id}`;
+        console.error(`[github] ${msg}`);
+        errors.push(msg);
+        continue;
+      }
+      candidateIds.add(loaded.question.id);
+      candidateQuestions.push(loaded.question);
+      stagedByTopic.set(loaded.topicId, (stagedByTopic.get(loaded.topicId) ?? 0) + 1);
+    }
+
+    for (const [topicId, count] of stagedByTopic) {
+      console.log(`[github] Staged ${count} questions for ${topicId}`);
     }
 
     if (errors.length > 0) {
@@ -318,6 +368,16 @@ function resolveSyncTimeoutMs(): number {
   const parsed = Number.parseInt(process.env.GITHUB_SYNC_TIMEOUT_MS ?? "60000", 10);
   if (!Number.isFinite(parsed)) return 60_000;
   return Math.max(5_000, Math.min(300_000, parsed));
+}
+
+function normalizeSyncConcurrency(value: number): number {
+  if (!Number.isFinite(value)) return 8;
+  return Math.max(1, Math.min(16, Math.trunc(value)));
+}
+
+function resolveSyncConcurrency(): number {
+  const parsed = Number.parseInt(process.env.GITHUB_SYNC_CONCURRENCY ?? "8", 10);
+  return normalizeSyncConcurrency(parsed);
 }
 
 /**

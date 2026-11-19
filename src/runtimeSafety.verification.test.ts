@@ -5,6 +5,7 @@ import {
   getActivePoolSize,
   getPoolQuestion,
   getQuestionById,
+  getTopicQuestions,
   getTotalBankSize,
   getContentBankPersistenceSnapshot,
   hydrateContentBankPersistenceSnapshot,
@@ -234,6 +235,57 @@ test("GitHub sync retains the complete prior catalog while a staged fetch fails"
   assert.equal(getQuestionById("old-question")?.engineFormat.text, "Old live question");
   assert.equal(getQuestionById("new-one"), null);
   assert.equal(getPoolQuestion(0)?.text, "Old live question");
+  resetRuntimeState();
+});
+
+test("GitHub sync bounds concurrent reads and commits in deterministic source order", { concurrency: false }, async () => {
+  resetRuntimeState();
+  let activeReads = 0;
+  let maximumActiveReads = 0;
+  const completedFiles: string[] = [];
+  const files = Array.from({ length: 9 }, (_, index) => `q-${index + 1}.json`);
+  const source: GitHubContentSource = {
+    async fetchJson<T>(path: string): Promise<T> {
+      if (path.endsWith("index.json")) {
+        return { topics: [{ id: "bounded-topic" }] } as T;
+      }
+      const file = path.split("/").at(-1) ?? "";
+      const questionNumber = Number.parseInt(file.match(/\d+/)?.[0] ?? "0", 10);
+      activeReads += 1;
+      maximumActiveReads = Math.max(maximumActiveReads, activeReads);
+      await new Promise((resolve) => setTimeout(resolve, (10 - questionNumber) * 2));
+      activeReads -= 1;
+      completedFiles.push(file);
+      return buildQuestion(
+        `bounded-${questionNumber}`,
+        "bounded-topic",
+        `Bounded question ${questionNumber}`
+      ) as T;
+    },
+    async listDirectory(_path, type) {
+      return type === "dir" ? ["bounded-topic"] : [...files].reverse();
+    },
+  };
+
+  const result = await syncCatalogFromSource(
+    source,
+    "content/topics",
+    { concurrency: 3 }
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.questionsLoaded, 9);
+  assert.equal(maximumActiveReads, 3);
+  assert.notDeepEqual(completedFiles, [...files].sort(), "fixture must complete out of source order");
+  assert.equal(getTotalBankSize(), 9);
+  assert.deepEqual(
+    getTopicQuestions("bounded-topic").map((entry) => entry.id),
+    Array.from({ length: 9 }, (_, index) => `bounded-${index + 1}`),
+    "catalog insertion order must follow sorted source paths, not completion timing"
+  );
+  for (let questionNumber = 1; questionNumber <= 9; questionNumber += 1) {
+    assert.ok(getQuestionById(`bounded-${questionNumber}`));
+  }
   resetRuntimeState();
 });
 
